@@ -23,9 +23,13 @@ async function start() {
     process.exit(1);
   }
 
-  // Connect Redis (lazyConnect=true, so we call connect explicitly)
+  // Connect Redis with timeout (lazyConnect=true, so we call connect explicitly)
   try {
-    await redis.connect();
+    const redisConnectPromise = redis.connect();
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Redis connection timeout')), 5000)
+    );
+    await Promise.race([redisConnectPromise, timeoutPromise]);
   } catch (err) {
     logger.warn('Redis connection failed — caching disabled', { error: err.message });
   }
@@ -42,7 +46,11 @@ async function start() {
     logger.info(`${signal} received — shutting down gracefully`);
     server.close(async () => {
       await pool.end();
-      await redis.quit();
+      try {
+        await redis.quit();
+      } catch (err) {
+        logger.warn('Redis quit error', { error: err.message });
+      }
       logger.info('All connections closed');
       process.exit(0);
     });
@@ -53,3 +61,4 @@ async function start() {
 }
 
 start();
+
