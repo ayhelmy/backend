@@ -89,11 +89,11 @@ module.exports = {
     // Maximum ZIP upload size in bytes
     maxUploadBytes: parseInt(process.env.MAX_UPLOAD_MB || '500', 10) * 1024 * 1024,
     // Thumbnail image storage
-    thumbnailsDir: process.env.THUMBNAIL_STORAGE_PATH || 'app/backend/storage/thumbnails',
+    thumbnailsDir: process.env.THUMBNAIL_STORAGE_PATH || 'storage/thumbnails',
     thumbnailsUrlPrefix: '/thumbnails',
     maxThumbnailBytes: parseInt(process.env.MAX_THUMBNAIL_MB || '5', 10) * 1024 * 1024,
     // Lesson file storage (videos, PDFs, documents)
-    lessonFilesDir: process.env.LESSON_FILES_STORAGE_PATH || 'app/backend/storage/lesson-files',
+    lessonFilesDir: process.env.LESSON_FILES_STORAGE_PATH || 'storage/lesson-files',
     lessonFilesUrlPrefix: '/lesson-files',
     maxLessonFileBytes: parseInt(process.env.MAX_LESSON_FILE_MB || '200', 10) * 1024 * 1024,
   },
