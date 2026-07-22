@@ -58,6 +58,27 @@ app.get('/', (_req, res) => {
   });
 });
 
+// ── General storage static serving (catch-all for /storage/*) ──────────────
+// Serves files from the storage directory (simulations, thumbnails, lessons, etc.)
+// Mount BEFORE helmet to avoid middleware conflicts
+(function setupGeneralStorageStatic() {
+  const storageDir = path.isAbsolute(config.storage.simulationsDir)
+    ? path.dirname(config.storage.simulationsDir)  // e.g., /app/backend/storage
+    : path.resolve(__dirname, '..', 'storage');    // e.g., ./storage
+
+  const fs = require('fs');
+  fs.mkdirSync(storageDir, { recursive: true });
+
+  app.use('/storage', express.static(storageDir, {
+    dotfiles: 'deny',
+    index: false,
+    setHeaders: (res) => {
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    },
+  }));
+})();
+
 // ── WebGL simulation static serving — SRS §4.7 SIM-01 ──────────────────────
 // Serves extracted Unity WebGL builds from storage/simulations/{uuid}/.
 // URL: /simulations-runtime/{uuid}/index.html (and all sub-paths).
@@ -319,3 +340,4 @@ app.use(notFound);
 app.use(errorHandler);
 
 module.exports = app;
+
