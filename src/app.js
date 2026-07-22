@@ -58,6 +58,33 @@ app.get('/', (_req, res) => {
   });
 });
 
+// ── General Public Storage & Uploads static serving ─────────────────────────
+// Serves static root uploads and persistent volume files (e.g., /storage/BEDO-logo.png)
+(function setupGeneralStaticStorage() {
+  const fs = require('fs');
+  
+  // Resolve root storage directory (from ENV variable, config, or default fallback)
+  const baseStorageDir = process.env.STORAGE_PATH || (
+    config.storage && config.storage.baseDir
+      ? config.storage.baseDir
+      : path.resolve(__dirname, '..', 'storage')
+  );
+
+  const uploadsDir = path.resolve(__dirname, '..', 'uploads');
+
+  fs.mkdirSync(baseStorageDir, { recursive: true });
+  fs.mkdirSync(uploadsDir, { recursive: true });
+
+  const setStaticHeaders = (res) => {
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+  };
+
+  // Mount /storage and /uploads endpoints
+  app.use('/storage', express.static(baseStorageDir, { dotfiles: 'deny', setHeaders: setStaticHeaders }));
+  app.use('/uploads', express.static(uploadsDir, { dotfiles: 'deny', setHeaders: setStaticHeaders }));
+})();
+
 // ── WebGL simulation static serving — SRS §4.7 SIM-01 ──────────────────────
 // Serves extracted Unity WebGL builds from storage/simulations/{uuid}/.
 // URL: /simulations-runtime/{uuid}/index.html (and all sub-paths).
@@ -77,7 +104,7 @@ app.get('/', (_req, res) => {
   // can receive canvas click positions via postMessage without needing
   // same-origin access to the iframe's contentDocument.
   // Injected at the START of <head> so our capture-phase listeners are
-  // registered BEFORE Unity's scripts run.  Unity often calls
+  // registered BEFORE Unity's scripts run. Unity often calls
   // stopImmediatePropagation on keyboard events; by being first in the
   // capture chain we always fire before it can block us.
   const CLICK_TRACKER_SCRIPT = `<script>
@@ -206,7 +233,12 @@ app.get('/', (_req, res) => {
     : path.resolve(__dirname, '..', config.storage.thumbnailsDir);
   const fs = require('fs');
   fs.mkdirSync(thumbDir, { recursive: true });
-  app.use(config.storage.thumbnailsUrlPrefix, express.static(thumbDir, { dotfiles: 'deny' }));
+  app.use(config.storage.thumbnailsUrlPrefix, express.static(thumbDir, { 
+    dotfiles: 'deny',
+    setHeaders: (res) => {
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    },
+  }));
 })();
 
 // ── Lesson files static serving (video, PDF, documents) ──────────────────────
