@@ -1,18 +1,31 @@
-const redis = require('redis');
+/**
+ * Redis client (ioredis).
+ * SRS refs: §2.3 (Cache/Sessions: Redis 7), §8.1
+ * Used for: JWT refresh tokens, session state, API response caching.
+ */
+'use strict';
 
-// Use REDIS_URL from environment, with fallback for Railway
-const redisUrl = process.env.REDIS_URL || 'redis://:password@redis.railway.internal:6379';
+const Redis = require('ioredis');
+const config = require('./index');
+const logger = require('../utils/logger');
 
-const client = redis.createClient({
-  url: redisUrl,
-  // Add any additional options here
-});
+// Shared client configuration
+const options = {
+  retryStrategy: (times) => Math.min(times * 50, 2000),
+  lazyConnect: true,
+};
 
-client.on('error', (err) => console.error('Redis Client Error', err));
-client.on('connect', () => console.log('Redis connected successfully'));
+// Prefer REDIS_URL if available; fallback to individual host/port config
+const redis = process.env.REDIS_URL
+  ? new Redis(process.env.REDIS_URL, options)
+  : new Redis({
+      host: config.redis?.host || '127.0.0.1',
+      port: config.redis?.port || 6379,
+      password: config.redis?.password,
+      ...options,
+    });
 
-(async () => {
-  await client.connect();
-})();
+redis.on('connect', () => logger.info('Redis connected'));
+redis.on('error', (err) => logger.error('Redis error', { error: err.message }));
 
-module.exports = client;
+module.exports = redis;
