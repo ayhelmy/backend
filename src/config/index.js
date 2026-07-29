@@ -21,6 +21,46 @@ for (const key of required) {
   }
 }
 
+/**
+ * Resolve the Redis connection string.
+ *
+ * Railway reference variables (e.g. `${{ Redis.REDIS_URL }}`) are expanded
+ * by the Railway runtime before the process starts, so REDIS_URL should
+ * always arrive as a plain `redis://[:password@]host:port` string. If an
+ * unexpanded/malformed reference (e.g. containing `${{`) ever leaks
+ * through, fall back to building the URL from the individual REDIS_*
+ * variables instead of passing the broken string to ioredis.
+ */
+function resolveRedisUrl() {
+  const rawUrl = process.env.REDIS_URL;
+
+  if (rawUrl && !rawUrl.includes('${{') && !rawUrl.includes('}}')) {
+    return rawUrl;
+  }
+
+  if (rawUrl) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      'REDIS_URL contains an unresolved reference and will be ignored; falling back to REDIS_HOST/REDIS_PORT/REDIS_PASSWORD.'
+    );
+  }
+
+  const host = process.env.REDIS_HOST;
+  const port = process.env.REDIS_PORT || '6379';
+  const password = process.env.REDIS_PASSWORD;
+  const user = process.env.REDIS_USER;
+
+  if (!host) {
+    // No usable connection info at all — return null and let the Redis
+    // client fall back to its own localhost default. This keeps local
+    // development working without REDIS_URL configured.
+    return null;
+  }
+
+  const auth = password ? `${user || ''}:${password}@` : '';
+  return `redis://${auth}${host}:${port}`;
+}
+
 module.exports = {
   env: process.env.NODE_ENV || 'development',
   port: parseInt(process.env.PORT, 10) || 5000,
@@ -39,9 +79,11 @@ module.exports = {
   },
 
   redis: {
+    url: resolveRedisUrl(),
     host: process.env.REDIS_HOST || 'localhost',
     port: parseInt(process.env.REDIS_PORT, 10) || 6379,
     password: process.env.REDIS_PASSWORD || undefined,
+    user: process.env.REDIS_USER || undefined,
   },
 
   jwt: {
