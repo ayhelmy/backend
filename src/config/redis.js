@@ -19,7 +19,7 @@ const options = {
 
 /**
  * Mask credentials in a Redis connection string for safe logging,
- * e.g. redis://:secret@redis.railway.internal:6379 ->
+ * e.g. redis://:secret@redis.railway.internal:6379 →
  *      redis://:****@redis.railway.internal:6379
  */
 function maskRedisUrl(url) {
@@ -34,9 +34,13 @@ function maskRedisUrl(url) {
   }
 }
 
-const redisUrl = config.redis?.url;
+// ── Resolve connection details (env takes priority) ──────────────────────
+let redisUrl = process.env.REDIS_URL || process.env.REDISCLOUD_URL || null;
+if (!redisUrl && config.redis?.url) {
+  redisUrl = config.redis.url;
+}
 
-let redis;
+let redis = null;
 
 if (redisUrl) {
   logger.info(`Connecting to Redis via connection string: ${maskRedisUrl(redisUrl)}`);
@@ -55,15 +59,22 @@ if (redisUrl) {
     ...options,
   });
 } else {
-  logger.error(
-    'No Redis connection information found (REDIS_URL or REDIS_HOST are both unset). Falling back to 127.0.0.1:6379.'
+  // No Redis configuration → client stays null. auth.service will use memory fallback.
+  logger.warn(
+    'No Redis connection information found (REDIS_URL, REDISCLOUD_URL, or config.redis.host). ' +
+    'Running without Redis – refresh tokens will be stored in memory only (no persistence).'
   );
-  redis = new Redis({ host: '127.0.0.1', port: 6379, ...options });
+  redis = null;
 }
 
-redis.on('connect', () => logger.info('Redis connected'));
-redis.on('ready', () => logger.info('Redis ready'));
-redis.on('reconnecting', (delay) => logger.warn(`Redis reconnecting in ${delay}ms`));
-redis.on('error', (err) => logger.error('Redis error', { error: err.message }));
+// ── Attach event listeners only if we have a client ──────────────────────
+if (redis) {
+  redis.on('connect', () => logger.info('Redis connected'));
+  redis.on('ready', () => logger.info('Redis ready'));
+  redis.on('reconnecting', (delay) => logger.warn(`Redis reconnecting in ${delay}ms`));
+  redis.on('error', (err) => logger.error('Redis error', { error: err.message }));
+} else {
+  logger.info('Redis client is null – auth service will use in‑memory fallback.');
+}
 
 module.exports = redis;
