@@ -84,41 +84,59 @@ async function buildAuthPayload(userId) {
   };
 }
 
+// ── Redis helpers with error handling ──────────────────────────────────────
+async function safeRedisCall(fn, fallback = null, ...args) {
+  try {
+    return await fn(...args);
+  } catch (err) {
+    console.warn(`Redis operation failed: ${err.message}`);
+    return fallback;
+  }
+}
+
 // ── Store a new refresh token ─────────────────────────────────────────────────
 async function storeRefreshToken(userId, institutionId, token) {
-  await redis.setex(
-    keys.refresh(token),
-    REFRESH_TTL_SECONDS,
-    JSON.stringify({ userId, institutionId }),
-  );
-  await redis.sadd(keys.sessions(userId), token);
-  // keep session set TTL in sync
-  await redis.expire(keys.sessions(userId), REFRESH_TTL_SECONDS + 60);
+  try {
+    await redis.setex(
+      keys.refresh(token),
+      REFRESH_TTL_SECONDS,
+      JSON.stringify({ userId, institutionId }),
+    );
+    await redis.sadd(keys.sessions(userId), token);
+    await redis.expire(keys.sessions(userId), REFRESH_TTL_SECONDS + 60);
+  } catch (err) {
+    console.warn(`Failed to store refresh token for user ${userId}: ${err.message}`);
+    // Do not rethrow – we want login/refresh to succeed even if Redis is down.
+    // However, if refresh token isn't stored, subsequent refresh will fail.
+  }
 }
 
 // ── Revoke a specific refresh token ──────────────────────────────────────────
 async function revokeRefreshToken(userId, token) {
-  await redis.del(keys.refresh(token));
-  await redis.srem(keys.sessions(userId), token);
+  try {
+    await redis.del(keys.refresh(token));
+    await redis.srem(keys.sessions(userId), token);
+  } catch (err) {
+    console.warn(`Failed to revoke refresh token for user ${userId}: ${err.message}`);
+  }
 }
 
-// ── Revoke all sessions for a user (password reset, account suspension) ───────
+// ── Revoke all sessions for a user ───────────────────────────────────────────
 async function revokeAllSessions(userId) {
-  const tokens = await redis.smembers(keys.sessions(userId));
-  if (tokens.length) {
-    await redis.del(...tokens.map(keys.refresh));
-    await redis.del(keys.sessions(userId));
+  try {
+    const tokens = await redis.smembers(keys.sessions(userId));
+    if (tokens.length) {
+      await redis.del(...tokens.map(keys.refresh));
+      await redis.del(keys.sessions(userId));
+    }
+    await redis.del(`user_perms:${userId}:*`);
+  } catch (err) {
+    console.warn(`Failed to revoke all sessions for user ${userId}: ${err.message}`);
   }
-  // Invalidate cached permissions
-  await redis.del(`user_perms:${userId}:*`);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
 // AUTH-01  Register
-// SRS §4.1 AUTH-01, §4.4 INST-04:
-//   Email domain is looked up against institution_domains + institutions.domain.
-//   Unrecognised domains are rejected — the platform is institution-only.
-//   Recognised domains get institution_id set and 'student' role auto-assigned.
 // ═════════════════════════════════════════════════════════════════════════════
 exports.register = async ({ email, password, firstName, lastName }) => {
   const normEmail = email.toLowerCase().trim();
@@ -126,7 +144,6 @@ exports.register = async ({ email, password, firstName, lastName }) => {
   const existing = await UserModel.findByEmailWithHash(normEmail);
   if (existing) throw ApiError.conflict('An account with this email already exists.');
 
-  // ── Resolve institution from email domain (INST-04) ───────────────────────
   const emailDomain = normEmail.split('@')[1];
   const institution = emailDomain
     ? await InstitutionModel.findByEmailDomain(emailDomain)
@@ -139,7 +156,6 @@ exports.register = async ({ email, password, firstName, lastName }) => {
     );
   }
 
-  // Subscription user-cap check (SRS §4.4 INST-01)
   const activeCount = await UserModel.countByInstitution(institution.id);
   if (activeCount >= institution.max_users) {
     throw ApiError.badRequest(
@@ -155,11 +171,15 @@ exports.register = async ({ email, password, firstName, lastName }) => {
     status: 'pending',
   });
 
-  // Auto-assign 'student' role for all self-registered users (SRS AUTH-01)
   await RoleModel.assignRole(user.id, 'student', institution.id, null);
 
   const token = randomToken();
-  await redis.setex(keys.emailVerify(token), EMAIL_VERIFY_TTL, user.id);
+  try {
+    await redis.setex(keys.emailVerify(token), EMAIL_VERIFY_TTL, user.id);
+  } catch (err) {
+    console.warn(`Failed to store email verification token for ${normEmail}: ${err.message}`);
+    // We'll continue; user can request resend.
+  }
   await sendVerificationEmail(normEmail, token);
 
   await AuditModel.log({
@@ -179,11 +199,21 @@ exports.register = async ({ email, password, firstName, lastName }) => {
 // AUTH-01  Verify Email
 // ═════════════════════════════════════════════════════════════════════════════
 exports.verifyEmail = async (token, res) => {
-  const userId = await redis.get(keys.emailVerify(token));
+  let userId = null;
+  try {
+    userId = await redis.get(keys.emailVerify(token));
+  } catch (err) {
+    console.warn(`Failed to retrieve verification token: ${err.message}`);
+    throw ApiError.badRequest('Unable to verify email at this time. Please try again later.');
+  }
   if (!userId) throw ApiError.badRequest('Invalid or expired verification link. Please request a new one.');
 
   await UserModel.update(userId, { status: 'active' });
-  await redis.del(keys.emailVerify(token));
+  try {
+    await redis.del(keys.emailVerify(token));
+  } catch (err) {
+    console.warn(`Failed to delete verification token: ${err.message}`);
+  }
 
   await AuditModel.log({
     actorId:    userId,
@@ -192,7 +222,6 @@ exports.verifyEmail = async (token, res) => {
     entityId:   userId,
   });
 
-  // Auto-login on verification (issue tokens so user lands on dashboard)
   const payload = await buildAuthPayload(userId);
   const refreshToken = randomToken();
   await storeRefreshToken(userId, payload.user.institutionId, refreshToken);
@@ -208,14 +237,12 @@ exports.verifyEmail = async (token, res) => {
 exports.login = async ({ email, password }, req, res) => {
   const user = await UserModel.findByEmailWithHash(email);
 
-  // Unified 401 for non-existent accounts (timing safe: bcrypt compare below)
   const dummyHash = '$2a$12$invalidhashplaceholderXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
   if (!user) {
-    await comparePassword(password, dummyHash); // constant-time dummy compare
+    await comparePassword(password, dummyHash);
     throw ApiError.unauthorized('Invalid email or password.');
   }
 
-  // Status gates (AUTH-08)
   if (user.status === 'pending') {
     throw ApiError.forbidden(
       'Please verify your email address before signing in. Check your inbox for the verification link.',
@@ -227,29 +254,47 @@ exports.login = async ({ email, password }, req, res) => {
     );
   }
 
-  // Failed-login lockout (AUTH-08)
-  const failKey = keys.loginFails(email);
-  const fails   = parseInt(await redis.get(failKey) || '0', 10);
-  if (fails >= MAX_LOGIN_FAILS) {
-    const ttl = await redis.ttl(failKey);
-    throw ApiError.badRequest(
-      `Too many failed login attempts. Please try again in ${Math.ceil(ttl / 60)} minutes.`,
-    );
+  // Failed-login lockout – wrap in try-catch
+  let fails = 0;
+  try {
+    const failKey = keys.loginFails(email);
+    fails = parseInt(await redis.get(failKey) || '0', 10);
+    if (fails >= MAX_LOGIN_FAILS) {
+      const ttl = await redis.ttl(failKey);
+      throw ApiError.badRequest(
+        `Too many failed login attempts. Please try again in ${Math.ceil(ttl / 60)} minutes.`,
+      );
+    }
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    console.warn(`Failed to check login fails for ${email}: ${err.message}`);
+    // Continue without lockout (allow login)
   }
 
   const valid = await comparePassword(password, user.password_hash);
   if (!valid) {
-    const newCount = await redis.incr(failKey);
-    if (newCount === 1) await redis.expire(failKey, FAIL_WINDOW_SECONDS);
-    const remaining = MAX_LOGIN_FAILS - newCount;
-    const msg = remaining > 0
-      ? `Invalid email or password. ${remaining} attempt${remaining !== 1 ? 's' : ''} remaining.`
-      : 'Too many failed attempts. Account temporarily locked for 15 minutes.';
-    throw ApiError.unauthorized(msg);
+    try {
+      const failKey = keys.loginFails(email);
+      const newCount = await redis.incr(failKey);
+      if (newCount === 1) await redis.expire(failKey, FAIL_WINDOW_SECONDS);
+      const remaining = MAX_LOGIN_FAILS - newCount;
+      const msg = remaining > 0
+        ? `Invalid email or password. ${remaining} attempt${remaining !== 1 ? 's' : ''} remaining.`
+        : 'Too many failed attempts. Account temporarily locked for 15 minutes.';
+      throw ApiError.unauthorized(msg);
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      console.warn(`Failed to increment login fails for ${email}: ${err.message}`);
+      throw ApiError.unauthorized('Invalid email or password.');
+    }
   }
 
-  // Success — clear fail counter
-  await redis.del(failKey);
+  // Clear fail counter – try-catch
+  try {
+    await redis.del(keys.loginFails(email));
+  } catch (err) {
+    console.warn(`Failed to clear login fails for ${email}: ${err.message}`);
+  }
 
   const payload      = await buildAuthPayload(user.id);
   const refreshToken = randomToken();
@@ -297,12 +342,17 @@ exports.refresh = async (req, res) => {
   const token = req.cookies?.refreshToken;
   if (!token) throw ApiError.unauthorized('No refresh token. Please sign in again.');
 
-  const stored = await redis.get(keys.refresh(token));
+  let stored = null;
+  try {
+    stored = await redis.get(keys.refresh(token));
+  } catch (err) {
+    console.warn(`Failed to retrieve refresh token: ${err.message}`);
+    throw ApiError.unauthorized('Unable to verify session. Please sign in again.');
+  }
   if (!stored) throw ApiError.unauthorized('Session expired. Please sign in again.');
 
   const { userId, institutionId } = JSON.parse(stored);
 
-  // Token rotation — invalidate old token immediately
   await revokeRefreshToken(userId, token);
 
   const payload      = await buildAuthPayload(userId);
@@ -317,7 +367,6 @@ exports.refresh = async (req, res) => {
 // AUTH-05  Forgot Password
 // ═════════════════════════════════════════════════════════════════════════════
 exports.forgotPassword = async (email, req) => {
-  // Always return success — never reveal whether email exists (security)
   const user = await UserModel.findByEmailWithHash(email);
   console.log('Searching for user with email:', email);
   if (!user) {
@@ -327,7 +376,12 @@ exports.forgotPassword = async (email, req) => {
   console.log('User found with email:', email);
 
   const token = randomToken();
-  await redis.setex(keys.pwdReset(token), PWD_RESET_TTL, user.id);
+  try {
+    await redis.setex(keys.pwdReset(token), PWD_RESET_TTL, user.id);
+  } catch (err) {
+    console.warn(`Failed to store password reset token for ${email}: ${err.message}`);
+    return; // If Redis fails, we cannot proceed; but we still don't reveal to client.
+  }
   console.log('Generated password reset token for user:', user.id);
   await sendPasswordResetEmail(email, token);
 
@@ -346,19 +400,28 @@ exports.forgotPassword = async (email, req) => {
 // AUTH-05  Reset Password
 // ═════════════════════════════════════════════════════════════════════════════
 exports.resetPassword = async ({ token, password }, req) => {
-  const userId = await redis.get(keys.pwdReset(token));
+  let userId = null;
+  try {
+    userId = await redis.get(keys.pwdReset(token));
+  } catch (err) {
+    console.warn(`Failed to retrieve password reset token: ${err.message}`);
+    throw ApiError.badRequest('Unable to verify reset token. Please try again.');
+  }
   if (!userId) throw ApiError.badRequest('Invalid or expired password reset link. Please request a new one.');
 
   const passwordHash = await hashPassword(password);
-  await UserModel.update(userId, { status: 'active' }); // re-activate if suspended
+  await UserModel.update(userId, { status: 'active' });
   await require('../../config/database').query(
     'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
     [passwordHash, userId],
   );
 
-  // Invalidate all active sessions (force re-login on all devices)
   await revokeAllSessions(userId);
-  await redis.del(keys.pwdReset(token));
+  try {
+    await redis.del(keys.pwdReset(token));
+  } catch (err) {
+    console.warn(`Failed to delete password reset token: ${err.message}`);
+  }
 
   await AuditModel.log({
     actorId:    userId,
@@ -394,15 +457,20 @@ exports.getMe = async (userId) => {
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
-// AUTH-01  Resend verification email (bonus: needed for expired links)
+// AUTH-01  Resend verification email
 // ═════════════════════════════════════════════════════════════════════════════
 exports.resendVerification = async (email) => {
   const user = await UserModel.findByEmailWithHash(email);
-  if (!user || user.status !== 'pending') return; // silent
+  if (!user || user.status !== 'pending') return;
   const token = randomToken();
-  await redis.setex(keys.emailVerify(token), EMAIL_VERIFY_TTL, user.id);
+  try {
+    await redis.setex(keys.emailVerify(token), EMAIL_VERIFY_TTL, user.id);
+  } catch (err) {
+    console.warn(`Failed to store verification token for ${email}: ${err.message}`);
+    return;
+  }
   await sendVerificationEmail(email, token);
 };
 
-// Export the keys helper for use in permission cache invalidation
+// Export the keys helper
 exports._keys = keys;
