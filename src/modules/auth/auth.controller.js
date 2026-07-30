@@ -7,6 +7,13 @@
 const authService = require('./auth.service');
 const ApiResponse = require('../../utils/apiResponse');
 
+// ── Optional: enable detailed logging for debugging ──────────────────────
+const DEBUG = process.env.DEBUG_AUTH === 'true' || process.env.NODE_ENV === 'development';
+
+function log(...args) {
+  if (DEBUG) console.log('[Auth Controller]', ...args);
+}
+
 exports.register = async (req, res, next) => {
   try {
     const result = await authService.register(req.body);
@@ -37,11 +44,27 @@ exports.logout = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// ─── REFRESH – with detailed logging ─────────────────────────────────────
 exports.refresh = async (req, res, next) => {
   try {
+    log('🔍 Refresh request received');
+    log('🔍 Cookies:', req.cookies);
+    log('🔍 Headers (auth):', req.headers.authorization ? 'Bearer present' : 'None');
+
+    const token = req.cookies?.refreshToken;
+    log('🔍 Token from cookie:', token ? token.slice(0, 10) + '…' : 'MISSING');
+
+    // Delegate to service – it will throw appropriate errors
     const { accessToken, user } = await authService.refresh(req, res);
+
+    log('✅ Refresh successful for user:', user?.id || user?.email);
     ApiResponse.ok(res, 'Token refreshed', { accessToken, user });
-  } catch (err) { next(err); }
+  } catch (err) {
+    // Log the error details before passing to error handler
+    log('❌ Refresh failed:', err.message);
+    if (err.statusCode) log('❌ Status code:', err.statusCode);
+    next(err);
+  }
 };
 
 exports.forgotPassword = async (req, res, next) => {
