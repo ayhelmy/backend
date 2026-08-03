@@ -51,23 +51,34 @@ const FAIL_WINDOW_SECONDS = 15 * 60;              // 15 minutes lock window
 //}
 
 function setRefreshCookie(res, token) {
-  res.cookie('refreshToken', token, {
+  const cookieOptions = {
     httpOnly: true,
-
-    // Railway uses HTTPS
-    secure: true,
-
-    // Required for different frontend/backend domains
-    sameSite: 'none',
-
+    secure: config.env === 'production',
+    sameSite: config.env === 'production' ? 'none' : 'lax',
     path: '/',
+    maxAge: REFRESH_TTL_SECONDS * 1000,
+  };
 
-    maxAge: REFRESH_TTL_SECONDS * 1000
-  });
+  res.cookie('refreshToken', token, cookieOptions);
 }
 
 function clearRefreshCookie(res) {
-  res.clearCookie('refreshToken', { httpOnly: true, path: '/' });
+  res.clearCookie('refreshToken', {
+    httpOnly: true,
+    secure: config.env === 'production',
+    sameSite: config.env === 'production' ? 'none' : 'lax',
+    path: '/',
+  });
+}
+
+function parseRefreshToken(req) {
+  if (req.cookies?.refreshToken) return req.cookies.refreshToken;
+  if (req.body?.refreshToken) return req.body.refreshToken;
+  const authHeader = req.headers?.authorization;
+  if (typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')) {
+    return authHeader.slice(7).trim();
+  }
+  return null;
 }
 
 // ── Shared: build auth response payload ──────────────────────────────────────
@@ -355,8 +366,8 @@ exports.logout = async (user, req, res) => {
 // AUTH-05  Refresh Token
 // ═════════════════════════════════════════════════════════════════════════════
 exports.refresh = async (req, res) => {
-  const token = req.cookies?.refreshToken;
-  if (!token) throw ApiError.unauthorized('No refresh token. Please sign in again.');
+  const token = parseRefreshToken(req);
+  if (!token) throw ApiError.unauthorized('No refresh token provided. Please sign in again.');
 
   let stored = null;
   try {

@@ -781,9 +781,7 @@ exports.uploadSimulationThumbnail = async (catalogId, simId, file, actor, baseUr
   );
   if (!item) throw ApiError.notFound('Simulation not found in this catalog.');
 
-  const thumbDir = path.isAbsolute(config.storage.thumbnailsDir)
-    ? config.storage.thumbnailsDir
-    : path.resolve(__dirname, '../../..', config.storage.thumbnailsDir);
+  const thumbDir = config.storage.thumbnailsDirAbs;
 
   fs.mkdirSync(thumbDir, { recursive: true });
 
@@ -858,9 +856,7 @@ exports.uploadClickRegions = async (catalogId, simId, file, regionsJson, actor, 
     ({ width: imageWidth, height: imageHeight } = getImageDimensions(buffer));
 
     // Persist the reference image so the analytics dashboard can use it as background.
-    const thumbDir = path.isAbsolute(config.storage.thumbnailsDir)
-      ? config.storage.thumbnailsDir
-      : path.resolve(__dirname, '../../..', config.storage.thumbnailsDir);
+    const thumbDir = config.storage.thumbnailsDirAbs;
     fs.mkdirSync(thumbDir, { recursive: true });
     const ext      = path.extname(file.originalname).toLowerCase() || '.png';
     const filename = `${simId}-regions${ext}`;

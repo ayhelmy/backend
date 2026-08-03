@@ -207,9 +207,7 @@ app.get('/', (_req, res) => {
 
 // ── Lesson files static serving (video, PDF, documents) ──────────────────────
 (function setupLessonFilesStatic() {
-  const lessonFilesDir = path.isAbsolute(config.storage.lessonFilesDir)
-    ? config.storage.lessonFilesDir
-    : path.resolve(__dirname, '..', config.storage.lessonFilesDir);
+  const lessonFilesDir = config.storage.lessonFilesDirAbs;
   const fs = require('fs');
   fs.mkdirSync(lessonFilesDir, { recursive: true });
   app.use(config.storage.lessonFilesUrlPrefix, express.static(lessonFilesDir, {
@@ -229,8 +227,13 @@ app.use(helmet({
 }));
 
 // CORS configuration
+const allowedOrigin = config.cors.origin;
 const corsOptions = {
-  origin: true,
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (origin === allowedOrigin) return callback(null, true);
+    callback(new Error(`Origin ${origin} not allowed by CORS`));
+  },
   credentials: true,
 };
 
