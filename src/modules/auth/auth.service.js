@@ -40,13 +40,29 @@ const MAX_LOGIN_FAILS     = 5;
 const FAIL_WINDOW_SECONDS = 15 * 60;              // 15 minutes lock window
 
 // ── Cookie helpers ────────────────────────────────────────────────────────────
+//function setRefreshCookie(res, token) {
+  //res.cookie('refreshToken', token, {
+    //httpOnly: true,
+    //secure:   config.env === 'production',
+    //sameSite: config.env === 'production' ? 'strict' : 'lax',
+    //path:     '/',
+    //maxAge:   REFRESH_TTL_SECONDS * 1000,
+  //});
+//}
+
 function setRefreshCookie(res, token) {
   res.cookie('refreshToken', token, {
     httpOnly: true,
-    secure:   config.env === 'production',
-    sameSite: config.env === 'production' ? 'strict' : 'lax',
-    path:     '/',
-    maxAge:   REFRESH_TTL_SECONDS * 1000,
+
+    // Railway uses HTTPS
+    secure: true,
+
+    // Required for different frontend/backend domains
+    sameSite: 'none',
+
+    path: '/',
+
+    maxAge: REFRESH_TTL_SECONDS * 1000
   });
 }
 
