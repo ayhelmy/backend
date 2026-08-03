@@ -5,6 +5,7 @@
  */
 'use strict';
 
+const path = require('path');
 require('dotenv').config();
 
 const required = [
@@ -14,6 +15,11 @@ const required = [
   'DB_USER',
   'DB_PASSWORD',
 ];
+
+const projectRoot = path.resolve(__dirname, '..', '..');
+function resolveBasePath(dir) {
+  return path.isAbsolute(dir) ? dir : path.resolve(projectRoot, dir);
+}
 
 for (const key of required) {
   if (!process.env[key]) {
@@ -124,18 +130,21 @@ module.exports = {
 
   storage: {
     // Local filesystem path for extracted WebGL simulation builds.
-    // Relative to the backend root (server.js), or absolute if starts with /.
+    // Relative to the project root, or absolute if starts with /.
     simulationsDir: process.env.SIMULATION_STORAGE_PATH || 'storage/simulations',
+    simulationsDirAbs: resolveBasePath(process.env.SIMULATION_STORAGE_PATH || 'storage/simulations'),
     // Static URL prefix (served by express.static) — must start with /
     simulationsUrlPrefix: '/simulations-runtime',
     // Maximum ZIP upload size in bytes
     maxUploadBytes: parseInt(process.env.MAX_UPLOAD_MB || '500', 10) * 1024 * 1024,
     // Thumbnail image storage
     thumbnailsDir: process.env.THUMBNAIL_STORAGE_PATH || 'storage/thumbnails',
+    thumbnailsDirAbs: resolveBasePath(process.env.THUMBNAIL_STORAGE_PATH || 'storage/thumbnails'),
     thumbnailsUrlPrefix: '/thumbnails',
     maxThumbnailBytes: parseInt(process.env.MAX_THUMBNAIL_MB || '5', 10) * 1024 * 1024,
     // Lesson file storage (videos, PDFs, documents)
     lessonFilesDir: process.env.LESSON_FILES_STORAGE_PATH || 'storage/lesson-files',
+    lessonFilesDirAbs: resolveBasePath(process.env.LESSON_FILES_STORAGE_PATH || 'storage/lesson-files'),
     lessonFilesUrlPrefix: '/lesson-files',
     maxLessonFileBytes: parseInt(process.env.MAX_LESSON_FILE_MB || '200', 10) * 1024 * 1024,
   },

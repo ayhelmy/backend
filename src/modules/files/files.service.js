@@ -6,9 +6,7 @@ const crypto = require('crypto');
 const config = require('../../config');
 
 function getLessonFilesDir() {
-  return path.isAbsolute(config.storage.lessonFilesDir)
-    ? config.storage.lessonFilesDir
-    : path.resolve(__dirname, '..', '..', '..', config.storage.lessonFilesDir);
+  return config.storage.lessonFilesDirAbs;
 }
 
 // TODO: implement for S3 presigned URL (SRS §4.11 FILE-01 to FILE-05)

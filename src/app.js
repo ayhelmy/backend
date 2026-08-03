@@ -65,9 +65,7 @@ app.get('/', (_req, res) => {
 // Correct MIME types for compressed Unity WebGL assets.
 
 (function setupWebGLStatic() {
-  const simDir = path.isAbsolute(config.storage.simulationsDir)
-    ? config.storage.simulationsDir
-    : path.resolve(__dirname, '..', config.storage.simulationsDir);
+  const simDir = config.storage.simulationsDirAbs;
 
   // Ensure the directory exists before serving (avoids startup error)
   const fs = require('fs');
@@ -201,9 +199,7 @@ app.get('/', (_req, res) => {
 
 // ── Thumbnail static serving ─────────────────────────────────────────────────
 (function setupThumbnailStatic() {
-  const thumbDir = path.isAbsolute(config.storage.thumbnailsDir)
-    ? config.storage.thumbnailsDir
-    : path.resolve(__dirname, '..', config.storage.thumbnailsDir);
+  const thumbDir = config.storage.thumbnailsDirAbs;
   const fs = require('fs');
   fs.mkdirSync(thumbDir, { recursive: true });
   app.use(config.storage.thumbnailsUrlPrefix, express.static(thumbDir, { dotfiles: 'deny' }));

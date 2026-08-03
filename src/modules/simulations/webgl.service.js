@@ -26,8 +26,7 @@ const config = require('../../config');
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
 function getStorageBase() {
-  const dir = config.storage.simulationsDir;
-  return path.isAbsolute(dir) ? dir : path.resolve(process.cwd(), dir);
+  return config.storage.simulationsDirAbs;
 }
 
 function getBuildPath(buildUuid) {
