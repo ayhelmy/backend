@@ -231,14 +231,27 @@ const allowedOrigin = config.cors.origin;
 const allowedOrigins = Array.isArray(allowedOrigin)
   ? allowedOrigin
   : String(allowedOrigin || '')
-      .split(/[,\s]+/)
+      .split(/[\s,]+/)
       .map((o) => o.trim())
       .filter(Boolean);
+
+function originMatchesPattern(origin, pattern) {
+  if (pattern === '*') return true;
+  if (pattern === origin) return true;
+
+  if (pattern.includes('*')) {
+    const escaped = pattern.replace(/[-/\\^$+?.()|[\]{}]/g, '\\$&').replace(/\\\*/g, '.*');
+    const regex = new RegExp(`^${escaped}$`);
+    return regex.test(origin);
+  }
+
+  return false;
+}
 
 const corsOptions = {
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
-    if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+    if (allowedOrigins.some((pattern) => originMatchesPattern(origin, pattern))) {
       return callback(null, true);
     }
     callback(new Error(`Origin ${origin} not allowed by CORS`));
