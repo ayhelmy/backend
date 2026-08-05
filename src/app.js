@@ -220,61 +220,52 @@ app.get('/', (_req, res) => {
 
 // ── Security & parsing ──────────────────────────────────────────────────────
 // Allow the WebGL player page to embed the /simulations-runtime/* content in an iframe.
+const explicitOrigins = [
+  'https://simulab-3gr5gkh0o-bedo4.vercel.app',
+  'https://simulab-six.vercel.app',
+];
+
+const allowedOriginFromConfig = config.cors.origin;
+const allowedOrigins = Array.isArray(allowedOriginFromConfig)
+  ? [...allowedOriginFromConfig]
+  : String(allowedOriginFromConfig || '')
+      .split(/[\s,]+/)
+      .map((o) => o.trim())
+      .filter(Boolean);
+
+for (const origin of explicitOrigins) {
+  if (!allowedOrigins.includes(origin)) {
+    allowedOrigins.push(origin);
+  }
+}
+
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests without origin (Postman, mobile apps, server-to-server)
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    console.error('Blocked CORS origin:', origin);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+};
+
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
+
 app.use(helmet({
   contentSecurityPolicy: false,       // Managed per-route; Unity builds need unsafe-eval
   crossOriginEmbedderPolicy: false,   // Already set per-path for simulations-runtime
   crossOriginOpenerPolicy: false,     // Same — set explicitly on simulations-runtime
 }));
-
-// CORS configuration
-const allowedOrigin = config.cors.origin;
-const allowedOrigins = Array.isArray(allowedOrigin)
-  ? allowedOrigin
-  : String(allowedOrigin || '')
-      .split(/[\s,]+/)
-      .map((o) => o.trim())
-      .filter(Boolean);
-
-if (!allowedOrigins.length) {
-  allowedOrigins.push('*');
-}
-
-function escapeForRegex(value) {
-  return value.replace(/[-/\\^$+?.()|[\]{}]/g, '\\$&');
-}
-
-function originMatchesPattern(origin, pattern) {
-  if (pattern === '*') return true;
-  if (pattern === origin) return true;
-
-  if (pattern.includes('*')) {
-    const escaped = pattern
-      .split('*')
-      .map(escapeForRegex)
-      .join('.*');
-    const regex = new RegExp(`^${escaped}$`);
-    return regex.test(origin);
-  }
-
-  return false;
-}
-
-const corsOptions = {
-  origin: (origin, callback) => {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.some((pattern) => originMatchesPattern(origin, pattern))) {
-      return callback(null, true);
-    }
-    callback(new Error(`Origin ${origin} not allowed by CORS`));
-  },
-  credentials: true,
-};
-
-app.use(cors(corsOptions));
-
-// Important: use RegExp instead of '*'
-// Express v5 / newer router does not accept app.options('*')
-app.options(/.*/, cors(corsOptions));
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
