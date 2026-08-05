@@ -121,7 +121,7 @@ module.exports = {
   },
 
   cors: {
-    origin: (process.env.CORS_ORIGIN || '*').trim() || '*',
+    origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.trim() : '*',
   },
 
   swagger: {

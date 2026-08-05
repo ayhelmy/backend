@@ -235,12 +235,23 @@ const allowedOrigins = Array.isArray(allowedOrigin)
       .map((o) => o.trim())
       .filter(Boolean);
 
+if (!allowedOrigins.length) {
+  allowedOrigins.push('*');
+}
+
+function escapeForRegex(value) {
+  return value.replace(/[-/\\^$+?.()|[\]{}]/g, '\\$&');
+}
+
 function originMatchesPattern(origin, pattern) {
   if (pattern === '*') return true;
   if (pattern === origin) return true;
 
   if (pattern.includes('*')) {
-    const escaped = pattern.replace(/[-/\\^$+?.()|[\]{}]/g, '\\$&').replace(/\\\*/g, '.*');
+    const escaped = pattern
+      .split('*')
+      .map(escapeForRegex)
+      .join('.*');
     const regex = new RegExp(`^${escaped}$`);
     return regex.test(origin);
   }
