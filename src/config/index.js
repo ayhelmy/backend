@@ -121,7 +121,16 @@ module.exports = {
   },
 
   cors: {
-    origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.trim() : '*',
+    origin: (() => {
+      const env = process.env.CORS_ORIGIN?.trim();
+      const defaults = [
+        'http://localhost:3000',
+        'http://localhost:3001',
+        'https://simulab-git-main-bedo4.vercel.app',
+        'https://simulab-f6dfrtbym-bedo4.vercel.app',
+      ];
+      return env && env.length ? `${env},${defaults.join(',')}` : defaults.join(',');
+    })(),
   },
 
   swagger: {
