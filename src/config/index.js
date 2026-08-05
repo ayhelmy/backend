@@ -126,6 +126,7 @@ module.exports = {
       const defaults = [
         'http://localhost:3000',
         'http://localhost:3001',
+        'https://*.vercel.app',
         'https://simulab-git-main-bedo4.vercel.app',
         'https://simulab-f6dfrtbym-bedo4.vercel.app',
       ];
