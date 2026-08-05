@@ -228,10 +228,19 @@ app.use(helmet({
 
 // CORS configuration
 const allowedOrigin = config.cors.origin;
+const allowedOrigins = Array.isArray(allowedOrigin)
+  ? allowedOrigin
+  : String(allowedOrigin || '')
+      .split(/[,\s]+/)
+      .map((o) => o.trim())
+      .filter(Boolean);
+
 const corsOptions = {
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
-    if (origin === allowedOrigin) return callback(null, true);
+    if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
     callback(new Error(`Origin ${origin} not allowed by CORS`));
   },
   credentials: true,
