@@ -1,2 +1,5 @@
 storage/simulations/
-storage/simulations/
+node_modules/
+temp_patch/
+git-diff-files.txt
+git-untracked-files.txt
