@@ -46,6 +46,7 @@ const pageContentRoutes    = require('./modules/page-content/page-content.routes
 const activityRoutes       = require('./modules/simulation-activity/activity.routes');
 
 const app = express();
+app.set('trust proxy', true);
 
 // ── Root landing endpoint — SRS §4.16 API-01 ──────────────────────────────
 app.get('/', (_req, res) => {
