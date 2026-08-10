@@ -397,9 +397,12 @@ exports.listDemo = async (query) => {
   const { rows } = await pool.query(
     `SELECT DISTINCT s.id, s.title, s.description, s.type, s.thumbnail_url, s.estimated_minutes,
             s.difficulty, s.visibility, s.status, s.version, s.learning_objectives,
-              s.launch_type, s.build_uuid, s.original_zip_filename, s.storage_path,
-              s.public_entry_url, s.entry_file, s.build_status, s.build_validation,
-              s.file_size_bytes, s.created_at
+            s.launch_type, s.build_uuid, s.original_zip_filename, s.storage_path,
+            s.public_entry_url, s.entry_file, s.build_status, s.build_validation,
+            s.file_size_bytes, s.created_at
+       FROM simulations s ${joinClause}
+      WHERE ${where}
+      ORDER BY s.title
       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
     dataParams,
   );
