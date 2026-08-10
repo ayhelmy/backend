@@ -35,7 +35,25 @@ const { pool } = require('../config/database');
 
 const SALT_ROUNDS = 12;
 
+/**
+ * This script wipes and replaces simulations, catalogs, sessions, and
+ * grades unconditionally (see step 9 below). It must never run against a
+ * live database with real data. NODE_ENV=production blocks it outright;
+ * set ALLOW_PRODUCTION_SEED=yes-i-am-sure to override deliberately.
+ */
+function assertSafeToSeed() {
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_PRODUCTION_SEED !== 'yes-i-am-sure') {
+    console.error(
+      '\n❌  Refusing to run: NODE_ENV=production and this script deletes all ' +
+      'simulations, catalogs, sessions, and grades before reseeding.\n' +
+      '    Set ALLOW_PRODUCTION_SEED=yes-i-am-sure if you really intend to wipe production data.\n',
+    );
+    process.exit(1);
+  }
+}
+
 async function seed() {
+  assertSafeToSeed();
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
