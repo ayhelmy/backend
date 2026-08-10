@@ -2,6 +2,9 @@
 
 const app = require('./src/app');
 const config = require('./src/config');
+const { ensureStorageDirectories } = require('./storage');
+
+ensureStorageDirectories();
 
 const port = parseInt(process.env.PORT, 10) || config.port || 5000;
 

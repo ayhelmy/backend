@@ -8,10 +8,41 @@ const logger = require('../utils/logger');
 
 const REDIS_URL = process.env.REDIS_URL || process.env.REDISCLOUD_URL || null;
 
-let redis = null;
+function createNoopRedisClient() {
+  const resolveValue = (value) => Promise.resolve(value);
+
+  return {
+    get: async () => resolveValue(null),
+    set: async () => resolveValue(undefined),
+    setex: async () => resolveValue(undefined),
+    del: async () => resolveValue(undefined),
+    sadd: async () => resolveValue(undefined),
+    srem: async () => resolveValue(undefined),
+    smembers: async () => resolveValue([]),
+    expire: async () => resolveValue(undefined),
+    incr: async () => resolveValue(1),
+    ttl: async () => resolveValue(-1),
+    pipeline: () => ({
+      exec: async () => resolveValue([]),
+      setex: async () => resolveValue(undefined),
+      del: async () => resolveValue(undefined),
+      sadd: async () => resolveValue(undefined),
+      srem: async () => resolveValue(undefined),
+      smembers: async () => resolveValue([]),
+      expire: async () => resolveValue(undefined),
+      incr: async () => resolveValue(1),
+      ttl: async () => resolveValue(-1),
+    }),
+    on: () => undefined,
+    quit: async () => resolveValue(undefined),
+    disconnect: () => undefined,
+  };
+}
+
+let redis = createNoopRedisClient();
 
 if (REDIS_URL) {
-  logger.info(`Connecting to Redis via REDIS_URL`); // no need to log full URL
+  logger.info('Connecting to Redis via REDIS_URL'); // no need to log full URL
   redis = new Redis(REDIS_URL, {
     retryStrategy: (times) => Math.min(times * 100, 3000),
     maxRetriesPerRequest: 3,
