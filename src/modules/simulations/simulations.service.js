@@ -105,7 +105,10 @@ exports.list = async (query, actor) => {
     params.push(limit, offset);
     const result = await pool.query(
       `SELECT id, title, description, type, thumbnail_url, estimated_minutes,
-              difficulty, visibility, status, version, institution_id, created_at
+              difficulty, visibility, status, version, institution_id,
+              launch_type, build_uuid, original_zip_filename, storage_path,
+              public_entry_url, entry_file, build_status, build_validation,
+              file_size_bytes, created_at
          FROM simulations
         WHERE ${filters.join(' AND ')}
         ORDER BY title
@@ -184,7 +187,9 @@ exports.list = async (query, actor) => {
     const where = whereParts.join(' AND ');
     const cols  = `s.id, s.title, s.description, s.type, s.thumbnail_url,
                    s.estimated_minutes, s.difficulty, s.visibility, s.status, s.version,
-                   s.launch_type, s.build_status, s.created_at`;
+                   s.launch_type, s.build_uuid, s.original_zip_filename, s.storage_path,
+                   s.public_entry_url, s.entry_file, s.build_status, s.build_validation,
+                   s.file_size_bytes, s.created_at`;
 
     const { rows: countRows } = await pool.query(
       `SELECT COUNT(DISTINCT s.id) AS total FROM simulations s ${joinClause} WHERE ${where}`,
@@ -392,10 +397,9 @@ exports.listDemo = async (query) => {
   const { rows } = await pool.query(
     `SELECT DISTINCT s.id, s.title, s.description, s.type, s.thumbnail_url, s.estimated_minutes,
             s.difficulty, s.visibility, s.status, s.version, s.learning_objectives,
-            s.launch_type, s.build_status, s.created_at
-       FROM simulations s ${joinClause}
-      WHERE ${where}
-      ORDER BY s.title
+              s.launch_type, s.build_uuid, s.original_zip_filename, s.storage_path,
+              s.public_entry_url, s.entry_file, s.build_status, s.build_validation,
+              s.file_size_bytes, s.created_at
       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
     dataParams,
   );
