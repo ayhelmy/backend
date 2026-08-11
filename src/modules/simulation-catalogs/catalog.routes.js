@@ -55,6 +55,10 @@ router.get('/assigned-tree', canView, c.getInstitutionTree);
 router.get('/',  canManage, c.listCatalogs);
 router.post('/', canManage, v.createCatalog, validate, c.createCatalog);
 
+// ── Storage recovery tool (keep before /:id to avoid shadowing) ───────────────
+router.get('/storage-scan',    canManage, c.scanStorage);
+router.post('/storage-relink', canManage, c.relinkSimulations);
+
 // ── Parameterized read ────────────────────────────────────────────────────────
 router.get('/:id/tree',  canView, c.getSubtree);
 router.get('/:id/items', canView, c.listItems);

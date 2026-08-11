@@ -54,3 +54,15 @@ exports.uploadWebGLSimulation = async (req, res, next) => {
     );
   } catch (e) { next(e); }
 };
+
+// ── Storage scan / relink (recovery tool) ─────────────────────────────────────
+exports.scanStorage = async (req, res, next) => {
+  try { ApiResponse.ok(res, 'Storage scan', await svc.scanStorage(req.user)); } catch (e) { next(e); }
+};
+
+exports.relinkSimulations = async (req, res, next) => {
+  try {
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    ApiResponse.ok(res, 'Simulations relinked', await svc.relinkSimulations(req.body.mappings, req.user, baseUrl));
+  } catch (e) { next(e); }
+};

@@ -118,6 +118,7 @@ const SimulationModel = {
       'estimated_minutes','difficulty','max_score','pass_score','max_attempts',
       'scoring_config','learning_objectives','status','visibility','version',
       'launch_type','build_status','build_validation','public_entry_url','storage_path',
+      'build_uuid','entry_file',
     ];
     const sets = [];
     const params = [];

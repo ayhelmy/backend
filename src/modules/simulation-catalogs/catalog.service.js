@@ -1230,3 +1230,203 @@ exports.saveSimulationSteps = async (catalogId, simId, steps, actor) => {
     categoryName: r.category_name,
   }));
 };
+
+// ── Storage scan / relink (recovery tool — see incident notes) ────────────────
+//
+// The seed script previously wiped the simulations table in production,
+// orphaning any real Unity WebGL builds / thumbnails already sitting on the
+// storage volume (their DB rows are gone, but the files remain). These two
+// admin-only endpoints let a super_admin inventory what's actually on disk
+// and relink existing simulation rows to the real files, instead of guessing.
+
+/**
+ * GET /simulation-catalogs/storage-scan
+ * Read-only inventory of storage/simulations/* and storage/thumbnails/*,
+ * cross-referenced against current simulation rows, so an admin can see
+ * which folders are real (vs. seed stubs) and which are already linked.
+ */
+exports.scanStorage = async (actor) => {
+  requireManageGlobal(actor);
+
+  const simBase   = config.storage.simulationsDirAbs;
+  const thumbBase = config.storage.thumbnailsDirAbs;
+
+  const { rows: sims } = await pool.query(
+    `SELECT id, title, build_uuid, thumbnail_url, build_validation
+       FROM simulations WHERE deleted_at IS NULL ORDER BY title`,
+  );
+
+  let buildDirNames = [];
+  try {
+    buildDirNames = fs.readdirSync(simBase, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch (_) { buildDirNames = []; }
+
+  const storageBuilds = buildDirNames.map((uuid) => {
+    const dir = path.join(simBase, uuid);
+    const indexHtml = path.join(dir, 'index.html');
+    const hasIndexHtml = fs.existsSync(indexHtml);
+
+    let detectedTitle = null;
+    if (hasIndexHtml) {
+      try {
+        const html = fs.readFileSync(indexHtml, 'utf8');
+        const m = html.match(/<title>([^<]*)<\/title>/i);
+        if (m) detectedTitle = m[1].trim();
+      } catch (_) { /* unreadable — leave title null */ }
+    }
+
+    const buildDir = path.join(dir, 'Build');
+    let buildFileCount = 0;
+    let totalBytes = 0;
+    let hasNonEmptyFile = false;
+    if (fs.existsSync(buildDir)) {
+      for (const f of fs.readdirSync(buildDir)) {
+        const stat = fs.statSync(path.join(buildDir, f));
+        buildFileCount += 1;
+        totalBytes += stat.size;
+        if (stat.size > 0) hasNonEmptyFile = true;
+      }
+    }
+
+    const linkedSim = sims.find((s) => s.build_uuid === uuid);
+
+    return {
+      buildUuid: uuid,
+      hasIndexHtml,
+      detectedTitle,
+      buildFileCount,
+      totalBytes,
+      looksLikeStub: !hasIndexHtml || !hasNonEmptyFile,
+      currentlyLinkedTo: linkedSim ? { simulationId: linkedSim.id, title: linkedSim.title } : null,
+    };
+  });
+
+  let thumbFileNames = [];
+  try {
+    thumbFileNames = fs.readdirSync(thumbBase, { withFileTypes: true })
+      .filter((e) => e.isFile())
+      .map((e) => e.name);
+  } catch (_) { thumbFileNames = []; }
+
+  const storageThumbnails = thumbFileNames.map((filename) => {
+    const stat = fs.statSync(path.join(thumbBase, filename));
+    const baseName = filename.replace(/\.[^.]+$/, '');
+    const matchingSim = sims.find((s) => baseName === s.id || baseName === `${s.id}-regions`);
+    return {
+      filename,
+      bytes: stat.size,
+      matchesSimulationId:    matchingSim ? matchingSim.id    : null,
+      matchesSimulationTitle: matchingSim ? matchingSim.title : null,
+    };
+  });
+
+  return {
+    simulations: sims.map((s) => ({
+      id:           s.id,
+      title:        s.title,
+      buildUuid:    s.build_uuid,
+      thumbnailUrl: s.thumbnail_url,
+      isStubBuild:  s.build_validation?.stub === true,
+    })),
+    storageBuilds,
+    storageThumbnails,
+  };
+};
+
+/**
+ * POST /simulation-catalogs/storage-relink
+ * body: { mappings: [{ simulationId, buildUuid?, thumbnailFilename? }] }
+ * Points existing simulation rows at real files already on the storage
+ * volume. Validates each build folder / thumbnail file exists before
+ * writing anything; per-mapping errors don't abort the rest of the batch.
+ */
+exports.relinkSimulations = async (mappings, actor, baseUrl = '') => {
+  requireManageGlobal(actor);
+
+  if (!Array.isArray(mappings) || mappings.length === 0) {
+    throw ApiError.badRequest('mappings[] is required.');
+  }
+
+  const results = [];
+
+  for (const m of mappings) {
+    const { simulationId, buildUuid, thumbnailFilename } = m ?? {};
+    if (!simulationId) {
+      results.push({ simulationId: simulationId ?? null, success: false, error: 'simulationId is required.' });
+      continue;
+    }
+
+    const sim = await SimulationModel.findById(simulationId);
+    if (!sim) {
+      results.push({ simulationId, success: false, error: 'Simulation not found.' });
+      continue;
+    }
+
+    const updates = {};
+
+    if (buildUuid) {
+      const buildDir = webglSvc.getBuildPath(buildUuid);
+      if (!fs.existsSync(buildDir)) {
+        results.push({ simulationId, success: false, error: `Build folder not found: ${buildUuid}` });
+        continue;
+      }
+
+      let validation;
+      try {
+        validation = await webglSvc.validateWebGLStructure(buildDir);
+      } catch (err) {
+        results.push({ simulationId, success: false, error: `Validation failed: ${err.message}` });
+        continue;
+      }
+      if (!validation.checklist?.indexHtml) {
+        results.push({ simulationId, success: false, error: `No index.html found under ${buildUuid}.` });
+        continue;
+      }
+
+      let entryFile = 'index.html';
+      if (validation.checklist.wrapperFolder) {
+        const rel = path.relative(buildDir, validation.checklist.wrapperFolder);
+        entryFile = `${rel}/index.html`.replace(/\\/g, '/');
+      }
+
+      updates.build_uuid        = buildUuid;
+      updates.storage_path      = buildDir;
+      updates.public_entry_url  = webglSvc.getPublicEntryUrl(buildUuid, entryFile);
+      updates.entry_file        = entryFile;
+      updates.build_status      = 'ready';
+      updates.build_validation  = validation;
+      updates.launch_type       = 'webgl';
+    }
+
+    if (thumbnailFilename) {
+      const thumbPath = path.join(config.storage.thumbnailsDirAbs, thumbnailFilename);
+      if (!fs.existsSync(thumbPath)) {
+        results.push({ simulationId, success: false, error: `Thumbnail not found: ${thumbnailFilename}` });
+        continue;
+      }
+      updates.thumbnail_url = `${baseUrl}${config.storage.thumbnailsUrlPrefix}/${thumbnailFilename}`;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      results.push({ simulationId, success: false, error: 'Provide buildUuid and/or thumbnailFilename.' });
+      continue;
+    }
+
+    const updated = await SimulationModel.update(simulationId, updates);
+
+    await AuditModel.log({
+      institutionId: actor.institutionId, actorId: actor.id, actorEmail: actor.email,
+      action: 'simulation.storage_relinked', entityType: 'Simulation', entityId: simulationId,
+      delta: {
+        before: { buildUuid: sim.build_uuid, thumbnailUrl: sim.thumbnail_url },
+        after:  updates,
+      },
+    }).catch(() => {});
+
+    results.push({ simulationId, title: sim.title, success: true, simulation: mapSimulation(updated) });
+  }
+
+  return { results };
+};
