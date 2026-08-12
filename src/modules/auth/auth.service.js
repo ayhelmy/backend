@@ -46,12 +46,12 @@ function setRefreshCookie(req, res, token) {
     httpOnly: true,
     secure:   isHttps,
     // SameSite=None is required for cookies to survive a cross-site fetch —
-    // browsers treat scheme+port as part of "site", so a local HTTPS backend
-    // paired with an HTTP frontend (or any cross-origin deployment) needs it.
-    // Production keeps Strict when not otherwise cross-site — real deployments
-    // should put frontend+backend under the same registrable domain so this
-    // stronger CSRF protection still applies.
-    sameSite: config.env === 'production' ? 'strict' : (isHttps ? 'none' : 'lax'),
+    // browsers treat the registrable domain as part of "site", and this
+    // deployment runs the frontend and backend on different domains
+    // (e.g. vercel.app / railway.app), so Strict would silently never be
+    // sent on the frontend's refresh calls. Only relax to Lax when the
+    // connection isn't HTTPS (local dev), since None requires Secure.
+    sameSite: isHttps ? 'none' : 'lax',
     path:     '/',
     maxAge:   REFRESH_TTL_SECONDS * 1000,
   });
@@ -62,7 +62,7 @@ function clearRefreshCookie(req, res) {
     httpOnly: true,
     path:     '/',
     secure:   req.secure,
-    sameSite: config.env === 'production' ? 'strict' : (req.secure ? 'none' : 'lax'),
+    sameSite: req.secure ? 'none' : 'lax',
   });
 }
 
