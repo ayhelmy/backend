@@ -1,0 +1,5 @@
+storage/
+node_modules/
+temp_patch/
+git-diff-files.txt
+git-untracked-files.txt
