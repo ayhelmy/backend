@@ -373,6 +373,29 @@ async function seed() {
       refrigeration:      '00000000-0000-4000-8000-000000000017',
     };
 
+    // Deterministic SVG placeholder — demo simulations have no real photo until
+    // an admin uploads one via the catalog thumbnail-upload flow; this keeps
+    // cards from showing a blank image in the meantime.
+    const THUMB_COLORS = ['#F59324', '#059669', '#7C3AED', '#2563EB', '#DC2626', '#0EA5E9'];
+    function escXml(str) {
+      return String(str)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    function placeholderThumbnail(title) {
+      const initials = (title.match(/[A-Za-z]+/g) || []).slice(0, 2).map((w) => w[0].toUpperCase()).join('') || 'SL';
+      let hash = 0;
+      for (let i = 0; i < title.length; i++) hash = (hash * 31 + title.charCodeAt(i)) >>> 0;
+      const color = THUMB_COLORS[hash % THUMB_COLORS.length];
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="225">`
+        + `<rect width="400" height="225" fill="#FDF2E3"/>`
+        + `<circle cx="200" cy="92" r="42" fill="${color}"/>`
+        + `<text x="200" y="105" font-family="system-ui,sans-serif" font-size="34" font-weight="700" fill="#ffffff" text-anchor="middle">${escXml(initials)}</text>`
+        + `<text x="200" y="172" font-family="system-ui,sans-serif" font-size="15" fill="#57534e" text-anchor="middle">${escXml(title)}</text>`
+        + `</svg>`;
+      return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+    }
+
     async function insertSim({ uuid, title, description, difficulty, estimatedMinutes, visibility, objectives }) {
       await client.query(`
         INSERT INTO simulations
@@ -380,13 +403,13 @@ async function seed() {
            build_uuid, original_zip_filename, storage_path, public_entry_url, entry_file,
            build_status, build_validation, estimated_minutes,
            difficulty, max_score, pass_score, max_attempts, scoring_config,
-           learning_objectives, status, visibility, version, created_by)
+           learning_objectives, status, visibility, version, created_by, thumbnail_url)
         VALUES
           (NULL, $1, $2, 'webgl', 'webgl',
            $3, $4, $5, $6, 'index.html',
            'ready', '{"valid":true,"stub":true}', $7,
            $8, 100, 70, 3, '{"hints_penalty":5,"max_hints":3}',
-           $9, 'active', $10, '1.0.0', $11)
+           $9, 'active', $10, '1.0.0', $11, $12)
         ON CONFLICT DO NOTHING
       `, [
         title, description,
@@ -398,7 +421,7 @@ async function seed() {
         `/simulations-runtime/${uuid}/index.html`,
         estimatedMinutes, difficulty,
         objectives, visibility,
-        userIds.superadmin,
+        userIds.superadmin, placeholderThumbnail(title),
       ]);
       makeStubBuild(uuid, title);
       const { rows: [r] } = await client.query(
