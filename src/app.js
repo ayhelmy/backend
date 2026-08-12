@@ -19,7 +19,7 @@ const swaggerSpec = require('./config/swagger');
 const requestLogger = require('./middleware/requestLogger');
 const notFound = require('./middleware/notFound');
 const errorHandler = require('./middleware/errorHandler');
-const { defaultLimiter, authLimiter } = require('./middleware/rateLimiter');
+const { defaultLimiter, authLimiter, ltiLaunchLimiter } = require('./middleware/rateLimiter');
 
 // ── Module routers ──────────────────────────────────────────────────────────
 const authRoutes = require('./modules/auth/auth.routes');
@@ -34,9 +34,11 @@ const sessionsRoutes = require('./modules/simulations/sessions/sessions.routes')
 const gradesRoutes = require('./modules/grades/grades.routes');
 const progressRoutes = require('./modules/progress/progress.routes');
 const notificationsRoutes = require('./modules/notifications/notifications.routes');
-const messagesRoutes = require('./modules/messages/messages.routes');
+const notificationPreferencesRoutes = require('./modules/notifications/notification-preferences.routes');
+const mailRoutes = require('./modules/mail/mail.routes');
+const courseAnnouncementsRoutes = require('./modules/course-announcements/course-announcements.routes');
 const analyticsRoutes = require('./modules/analytics/analytics.routes');
-const dashboardRoutes = require('./modules/analytics/dashboard.routes');
+const dashboardRoutes = require('./modules/dashboard/dashboard.routes');
 const auditRoutes = require('./modules/audit/audit.routes');
 const settingsRoutes = require('./modules/settings/settings.routes');
 const filesRoutes = require('./modules/files/files.routes');
@@ -44,20 +46,32 @@ const academicYearsRoutes  = require('./modules/academic-years/academic-years.ro
 const semesterTermsRoutes  = require('./modules/semester-terms/semester-terms.routes');
 const pageContentRoutes    = require('./modules/page-content/page-content.routes');
 const activityRoutes       = require('./modules/simulation-activity/activity.routes');
+const quizzesRoutes          = require('./modules/quizzes/quizzes.routes');
+const quizAttemptsRoutes     = require('./modules/quiz-attempts/quiz-attempts.routes');
+const simulationScoresRoutes = require('./modules/simulation-scores/simulation-scores.routes');
+const gradeCategoriesRoutes  = require('./modules/grade-categories/grade-categories.routes');
+const ltiPlatformsRoutes     = require('./modules/lti/lti-platforms.routes');
+const ltiProtocolRoutes      = require('./modules/lti/lti-protocol.routes');
+const ltiAgsRoutes           = require('./modules/lti/ags.routes');
+const ltiNrpsRoutes          = require('./modules/lti/nrps.routes');
 
 const app = express();
-app.set('trust proxy', true);
 
-// ── Root landing endpoint — SRS §4.16 API-01 ──────────────────────────────
-app.get('/', (_req, res) => {
-  res.json({
-    status: 'ok',
-    service: 'Bedo SimuLearn API',
-    version: config.apiVersion,
-    docs: '/api/docs',
-    health: '/api/v1/health',
+// ── HTTPS enforcement — SRS §5 NFR-04 Security ──────────────────────────────
+// Trust the first proxy hop (reverse proxy / load balancer / PaaS router) so
+// req.secure, req.ip and req.protocol reflect the original client request
+// instead of the internal HTTP hop between the proxy and this Node process.
+if (config.env === 'production') {
+  app.set('trust proxy', 1);
+
+  // Redirect any plain-HTTP request to HTTPS. Relies on the proxy setting
+  // X-Forwarded-Proto (standard behaviour for nginx/Caddy/most PaaS routers).
+  // 308 preserves the original method/body, unlike a 301/302 GET-only redirect.
+  app.use((req, res, next) => {
+    if (req.secure) return next();
+    return res.redirect(308, `https://${req.headers.host}${req.originalUrl}`);
   });
-});
+}
 
 // ── WebGL simulation static serving — SRS §4.7 SIM-01 ──────────────────────
 // Serves extracted Unity WebGL builds from storage/simulations/{uuid}/.
@@ -66,7 +80,9 @@ app.get('/', (_req, res) => {
 // Correct MIME types for compressed Unity WebGL assets.
 
 (function setupWebGLStatic() {
-  const simDir = config.storage.simulationsDirAbs;
+  const simDir = path.isAbsolute(config.storage.simulationsDir)
+    ? config.storage.simulationsDir
+    : path.resolve(__dirname, '..', config.storage.simulationsDir);
 
   // Ensure the directory exists before serving (avoids startup error)
   const fs = require('fs');
@@ -200,7 +216,9 @@ app.get('/', (_req, res) => {
 
 // ── Thumbnail static serving ─────────────────────────────────────────────────
 (function setupThumbnailStatic() {
-  const thumbDir = config.storage.thumbnailsDirAbs;
+  const thumbDir = path.isAbsolute(config.storage.thumbnailsDir)
+    ? config.storage.thumbnailsDir
+    : path.resolve(__dirname, '..', config.storage.thumbnailsDir);
   const fs = require('fs');
   fs.mkdirSync(thumbDir, { recursive: true });
   app.use(config.storage.thumbnailsUrlPrefix, express.static(thumbDir, { dotfiles: 'deny' }));
@@ -208,7 +226,9 @@ app.get('/', (_req, res) => {
 
 // ── Lesson files static serving (video, PDF, documents) ──────────────────────
 (function setupLessonFilesStatic() {
-  const lessonFilesDir = config.storage.lessonFilesDirAbs;
+  const lessonFilesDir = path.isAbsolute(config.storage.lessonFilesDir)
+    ? config.storage.lessonFilesDir
+    : path.resolve(__dirname, '..', config.storage.lessonFilesDir);
   const fs = require('fs');
   fs.mkdirSync(lessonFilesDir, { recursive: true });
   app.use(config.storage.lessonFilesUrlPrefix, express.static(lessonFilesDir, {
@@ -219,58 +239,69 @@ app.get('/', (_req, res) => {
   }));
 })();
 
+// ── QTI-imported media asset static serving (images referenced by questions) ─
+(function setupQtiAssetsStatic() {
+  const qtiAssetsDir = path.isAbsolute(config.storage.qtiAssetsDir)
+    ? config.storage.qtiAssetsDir
+    : path.resolve(__dirname, '..', config.storage.qtiAssetsDir);
+  const fs = require('fs');
+  fs.mkdirSync(qtiAssetsDir, { recursive: true });
+  app.use(config.storage.qtiAssetsUrlPrefix, express.static(qtiAssetsDir, {
+    dotfiles: 'deny',
+    setHeaders: (res) => {
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    },
+  }));
+})();
+
+// ── Mail attachment static serving ────────────────────────────────────────────
+(function setupMailAttachmentsStatic() {
+  const mailAttachmentsDir = path.isAbsolute(config.storage.mailAttachmentsDir)
+    ? config.storage.mailAttachmentsDir
+    : path.resolve(__dirname, '..', config.storage.mailAttachmentsDir);
+  const fs = require('fs');
+  fs.mkdirSync(mailAttachmentsDir, { recursive: true });
+  app.use(config.storage.mailAttachmentsUrlPrefix, express.static(mailAttachmentsDir, {
+    dotfiles: 'deny',
+    setHeaders: (res) => {
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    },
+  }));
+})();
+
 // ── Security & parsing ──────────────────────────────────────────────────────
 // Allow the WebGL player page to embed the /simulations-runtime/* content in an iframe.
-const explicitOrigins = [
-  'https://simulab-3gr5gkh0o-bedo4.vercel.app',
-  'https://simulab-six.vercel.app',
-];
-
-const allowedOriginFromConfig = config.cors.origin;
-const allowedOrigins = Array.isArray(allowedOriginFromConfig)
-  ? [...allowedOriginFromConfig]
-  : String(allowedOriginFromConfig || '')
-      .split(/[\s,]+/)
-      .map((o) => o.trim())
-      .filter(Boolean);
-
-for (const origin of explicitOrigins) {
-  if (!allowedOrigins.includes(origin)) {
-    allowedOrigins.push(origin);
-  }
-}
-
-const corsOptions = {
-  origin: function (origin, callback) {
-    // Allow requests without origin (Postman, mobile apps, server-to-server)
-    if (!origin) {
-      return callback(null, true);
-    }
-
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-
-    console.error('Blocked CORS origin:', origin);
-    return callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-};
-
-app.use(cors(corsOptions));
-app.options(/.*/, cors(corsOptions));
-
 app.use(helmet({
   contentSecurityPolicy: false,       // Managed per-route; Unity builds need unsafe-eval
   crossOriginEmbedderPolicy: false,   // Already set per-path for simulations-runtime
   crossOriginOpenerPolicy: false,     // Same — set explicitly on simulations-runtime
+  hsts: config.env === 'production' && {
+    maxAge: 63072000,   // 2 years
+    includeSubDomains: true,
+    preload: true,
+  },
 }));
+
+// CORS configuration
+const corsOptions = {
+  origin: true,
+  credentials: true,
+};
+
+app.use(cors(corsOptions));
+
+// Important: use RegExp instead of '*'
+// Express v5 / newer router does not accept app.options('*')
+app.options(/.*/, cors(corsOptions));
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+
+// Resolves relative static-asset paths (thumbnails, WebGL builds, etc.) to
+// absolute URLs using the current request's host — see the file for why
+// this must stay centralized rather than done per-endpoint.
+app.use(require('./middleware/mediaUrlRewriter'));
 
 // Temporary request logger for debugging repeated API calls
 app.use((req, res, next) => {
@@ -304,6 +335,11 @@ apiRouter.use('/auth/forgot-password', authLimiter);
 apiRouter.use('/auth/reset-password', authLimiter);
 apiRouter.use('/auth/refresh', authLimiter);
 
+// Generous limiter for the public LTI OIDC login/launch endpoints — many
+// distinct students launching through one LMS is legitimate traffic.
+apiRouter.use('/lti/login', ltiLaunchLimiter);
+apiRouter.use('/lti/launch', ltiLaunchLimiter);
+
 // General limiter for all API routes after health-check
 apiRouter.use(defaultLimiter);
 
@@ -317,9 +353,19 @@ apiRouter.use('/simulations', simulationsRoutes);
 apiRouter.use('/simulation-catalogs', simCatalogsRoutes);
 apiRouter.use('/simulation-sessions', sessionsRoutes);
 apiRouter.use('/courses', gradesRoutes);
+apiRouter.use('/courses', quizzesRoutes);
+apiRouter.use('/courses', quizAttemptsRoutes);
+apiRouter.use('/courses', simulationScoresRoutes);
+apiRouter.use('/courses', gradeCategoriesRoutes);
+apiRouter.use('/lti-platforms', ltiPlatformsRoutes);
+apiRouter.use('/lti/ags', ltiAgsRoutes);
+apiRouter.use('/lti/nrps', ltiNrpsRoutes);
+apiRouter.use('/lti', ltiProtocolRoutes);
 apiRouter.use('/progress', progressRoutes);
 apiRouter.use('/notifications', notificationsRoutes);
-apiRouter.use('/messages', messagesRoutes);
+apiRouter.use('/notification-preferences', notificationPreferencesRoutes);
+apiRouter.use('/mail', mailRoutes);
+apiRouter.use('/courses', courseAnnouncementsRoutes);
 apiRouter.use('/analytics', analyticsRoutes);
 apiRouter.use('/dashboard', dashboardRoutes);
 apiRouter.use('/audit-logs', auditRoutes);

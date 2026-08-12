@@ -64,6 +64,8 @@ function mapCatalogItem(row) {
     thumbnailUrl:     row.thumbnail_url    ?? null,
     estimatedMinutes: row.estimated_minutes ?? null,
     difficulty:       row.difficulty,
+    isFeatured:       row.is_featured       ?? false,
+    featuredOrder:    row.featured_order    ?? null,
     addedAt:          row.created_at,
   };
 }
@@ -534,6 +536,55 @@ exports.getUnassignImpact = async (catalogId, institutionId, actor) => {
   return impact;
 };
 
+/**
+ * Platform-wide catalog assignment rollup — super_admin dashboard "Simulation
+ * Catalog Assignment Overview" section. No actor gate here; the dashboard route
+ * itself is super_admin-only.
+ */
+exports.platformAssignmentOverview = async () => {
+  const [assignedCatalogs, unassignedCatalogs, institutionsWithoutCatalogs, recentAssignments] = await Promise.all([
+    pool.query(
+      `SELECT COUNT(DISTINCT simulation_catalog_id) AS total
+         FROM institution_simulation_catalogs WHERE status = 'active'`,
+    ),
+    pool.query(
+      `SELECT COUNT(*) AS total FROM simulation_catalogs sc
+        WHERE sc.deleted_at IS NULL AND NOT EXISTS (
+          SELECT 1 FROM institution_simulation_catalogs isc
+           WHERE isc.simulation_catalog_id = sc.id AND isc.status = 'active'
+        )`,
+    ),
+    pool.query(
+      `SELECT COUNT(*) AS total FROM institutions i
+        WHERE i.deleted_at IS NULL AND NOT EXISTS (
+          SELECT 1 FROM institution_simulation_catalogs isc
+           WHERE isc.institution_id = i.id AND isc.status = 'active'
+        )`,
+    ),
+    pool.query(
+      `SELECT isc.status, isc.assigned_at, isc.unassigned_at,
+              sc.name AS catalog_name, i.name AS institution_name
+         FROM institution_simulation_catalogs isc
+         JOIN simulation_catalogs sc ON sc.id = isc.simulation_catalog_id
+         JOIN institutions i ON i.id = isc.institution_id
+        ORDER BY COALESCE(isc.unassigned_at, isc.assigned_at) DESC
+        LIMIT 10`,
+    ),
+  ]);
+
+  return {
+    catalogsAssigned: parseInt(assignedCatalogs.rows[0].total, 10),
+    catalogsUnassigned: parseInt(unassignedCatalogs.rows[0].total, 10),
+    institutionsWithoutCatalogs: parseInt(institutionsWithoutCatalogs.rows[0].total, 10),
+    recentAssignments: recentAssignments.rows.map((r) => ({
+      catalogName: r.catalog_name,
+      institutionName: r.institution_name,
+      status: r.status,
+      at: r.status === 'active' ? r.assigned_at : r.unassigned_at,
+    })),
+  };
+};
+
 exports.listAssignedInstitutions = async (catalogId, actor) => {
   requireManageGlobal(actor);
   const catalog = await SimulationCatalogModel.findById(catalogId);
@@ -602,6 +653,8 @@ function mapSimulation(row) {
     buildStatus:          row.build_status         ?? null,
     buildValidation:      row.build_validation     ?? null,
     fileSizeBytes:        row.file_size_bytes      ?? null,
+    isFeatured:           row.is_featured          ?? false,
+    featuredOrder:        row.featured_order       ?? null,
     createdAt:            row.created_at,
     updatedAt:            row.updated_at           ?? null,
   };
@@ -640,13 +693,21 @@ exports.createSimulationInCatalog = async (catalogId, body, actor) => {
 
   await SimulationCatalogModel.addItem(catalogId, sim.id, actor.id);
 
+  let finalSim = sim;
+  if (body.isFeatured !== undefined || body.featuredOrder !== undefined) {
+    finalSim = await SimulationModel.update(sim.id, {
+      is_featured:    body.isFeatured,
+      featured_order: body.featuredOrder,
+    });
+  }
+
   await AuditModel.log({
     institutionId: actor.institutionId, actorId: actor.id, actorEmail: actor.email,
     action: 'simulation.create_in_catalog', entityType: 'Simulation', entityId: sim.id,
     delta: { after: { title: sim.title, catalogId, catalogName: catalog.name } },
   });
 
-  return { simulation: mapSimulation(sim), catalogId };
+  return { simulation: mapSimulation(finalSim), catalogId };
 };
 
 /**
@@ -668,7 +729,8 @@ exports.getCatalogSimulations = async (catalogId, query, actor) => {
 
   const webglCols = `
     s.launch_type, s.build_uuid, s.original_zip_filename, s.storage_path,
-    s.public_entry_url, s.entry_file, s.build_status, s.build_validation, s.file_size_bytes
+    s.public_entry_url, s.entry_file, s.build_status, s.build_validation, s.file_size_bytes,
+    s.is_featured, s.featured_order
   `;
 
   if (includeChildren) {
@@ -736,6 +798,8 @@ exports.updateCatalogSimulation = async (catalogId, simId, body, actor) => {
     status:              body.status,
     version:             body.version,
     learning_objectives: body.learningObjectives,
+    is_featured:         body.isFeatured,
+    featured_order:      body.featuredOrder,
   });
 
   const updated = await SimulationModel.findById(simId);
@@ -770,7 +834,7 @@ exports.removeCatalogSimulation = async (catalogId, simId, actor) => {
  * PATCH /simulation-catalogs/:catalogId/simulations/:simId/thumbnail
  * Accepts a multipart image upload, persists to storage/thumbnails/, updates the simulation record.
  */
-exports.uploadSimulationThumbnail = async (catalogId, simId, file, actor, baseUrl = '') => {
+exports.uploadSimulationThumbnail = async (catalogId, simId, file, actor) => {
   requireManageGlobal(actor);
 
   if (!file) throw ApiError.badRequest('A thumbnail image file is required.');
@@ -781,7 +845,9 @@ exports.uploadSimulationThumbnail = async (catalogId, simId, file, actor, baseUr
   );
   if (!item) throw ApiError.notFound('Simulation not found in this catalog.');
 
-  const thumbDir = config.storage.thumbnailsDirAbs;
+  const thumbDir = path.isAbsolute(config.storage.thumbnailsDir)
+    ? config.storage.thumbnailsDir
+    : path.resolve(__dirname, '../../..', config.storage.thumbnailsDir);
 
   fs.mkdirSync(thumbDir, { recursive: true });
 
@@ -792,7 +858,10 @@ exports.uploadSimulationThumbnail = async (catalogId, simId, file, actor, baseUr
   fs.copyFileSync(file.path, dest);
   try { fs.unlinkSync(file.path); } catch (_) {}
 
-  const thumbnailUrl = `${baseUrl}${config.storage.thumbnailsUrlPrefix}/${filename}`;
+  // Stored relative — never bake the upload request's host into the DB
+  // value, or the URL breaks the moment the app is served from a different
+  // domain. Resolved back to absolute at response time by mediaUrlRewriter.
+  const thumbnailUrl = `${config.storage.thumbnailsUrlPrefix}/${filename}`;
 
   await SimulationModel.update(simId, { thumbnail_url: thumbnailUrl });
 
@@ -813,7 +882,7 @@ exports.uploadSimulationThumbnail = async (catalogId, simId, file, actor, baseUr
  * used later to resolve a recorded click's (normX, normY) to a component
  * name when generating the click-tracking CSV.
  */
-exports.uploadClickRegions = async (catalogId, simId, file, regionsJson, actor, baseUrl = '') => {
+exports.uploadClickRegions = async (catalogId, simId, file, regionsJson, actor) => {
   requireManageGlobal(actor);
 
   if (!file) throw ApiError.badRequest('A reference image file is required.');
@@ -856,12 +925,15 @@ exports.uploadClickRegions = async (catalogId, simId, file, regionsJson, actor, 
     ({ width: imageWidth, height: imageHeight } = getImageDimensions(buffer));
 
     // Persist the reference image so the analytics dashboard can use it as background.
-    const thumbDir = config.storage.thumbnailsDirAbs;
+    const thumbDir = path.isAbsolute(config.storage.thumbnailsDir)
+      ? config.storage.thumbnailsDir
+      : path.resolve(__dirname, '../../..', config.storage.thumbnailsDir);
     fs.mkdirSync(thumbDir, { recursive: true });
     const ext      = path.extname(file.originalname).toLowerCase() || '.png';
     const filename = `${simId}-regions${ext}`;
     fs.copyFileSync(file.path, path.join(thumbDir, filename));
-    referenceImageUrl = `${baseUrl}${config.storage.thumbnailsUrlPrefix}/${filename}`;
+    // Relative — same reasoning as uploadSimulationThumbnail above.
+    referenceImageUrl = `${config.storage.thumbnailsUrlPrefix}/${filename}`;
   } catch (err) {
     throw ApiError.badRequest(err.message);
   } finally {
@@ -926,7 +998,9 @@ exports.createWebGLSimulationInCatalog = async (catalogId, body, file, actor) =>
       entryFilePath = `${rel}/index.html`.replace(/\\/g, '/');
     }
     const publicEntryUrl = webglSvc.getPublicEntryUrl(buildUuid, entryFilePath);
-    const storagePath    = webglSvc.getBuildPath(buildUuid);
+    // Relative, for DB storage — NOT getBuildPath() (OS-absolute, only used
+    // for the actual fs.* calls above during extraction).
+    const storagePath    = webglSvc.getRelativeBuildPath(buildUuid);
 
     // 3. Persist simulation record
     sim = await SimulationModel.createWebGL({
@@ -951,6 +1025,14 @@ exports.createWebGLSimulationInCatalog = async (catalogId, body, file, actor) =>
 
     // 4. Link simulation to catalog
     await SimulationCatalogModel.addItem(catalogId, sim.id, actor.id);
+
+    // 4b. Featured flag (multipart body fields arrive as strings)
+    if (body.isFeatured !== undefined || body.featuredOrder !== undefined) {
+      sim = await SimulationModel.update(sim.id, {
+        is_featured:    body.isFeatured !== undefined ? body.isFeatured === 'true' : undefined,
+        featured_order: body.featuredOrder !== undefined ? Number(body.featuredOrder) : undefined,
+      });
+    }
 
     // 5. Audit
     await AuditModel.log({
@@ -1229,204 +1311,4 @@ exports.saveSimulationSteps = async (catalogId, simId, steps, actor) => {
     label:        r.label,
     categoryName: r.category_name,
   }));
-};
-
-// ── Storage scan / relink (recovery tool — see incident notes) ────────────────
-//
-// The seed script previously wiped the simulations table in production,
-// orphaning any real Unity WebGL builds / thumbnails already sitting on the
-// storage volume (their DB rows are gone, but the files remain). These two
-// admin-only endpoints let a super_admin inventory what's actually on disk
-// and relink existing simulation rows to the real files, instead of guessing.
-
-/**
- * GET /simulation-catalogs/storage-scan
- * Read-only inventory of storage/simulations/* and storage/thumbnails/*,
- * cross-referenced against current simulation rows, so an admin can see
- * which folders are real (vs. seed stubs) and which are already linked.
- */
-exports.scanStorage = async (actor) => {
-  requireManageGlobal(actor);
-
-  const simBase   = config.storage.simulationsDirAbs;
-  const thumbBase = config.storage.thumbnailsDirAbs;
-
-  const { rows: sims } = await pool.query(
-    `SELECT id, title, build_uuid, thumbnail_url, build_validation
-       FROM simulations WHERE deleted_at IS NULL ORDER BY title`,
-  );
-
-  let buildDirNames = [];
-  try {
-    buildDirNames = fs.readdirSync(simBase, { withFileTypes: true })
-      .filter((e) => e.isDirectory())
-      .map((e) => e.name);
-  } catch (_) { buildDirNames = []; }
-
-  const storageBuilds = buildDirNames.map((uuid) => {
-    const dir = path.join(simBase, uuid);
-    const indexHtml = path.join(dir, 'index.html');
-    const hasIndexHtml = fs.existsSync(indexHtml);
-
-    let detectedTitle = null;
-    if (hasIndexHtml) {
-      try {
-        const html = fs.readFileSync(indexHtml, 'utf8');
-        const m = html.match(/<title>([^<]*)<\/title>/i);
-        if (m) detectedTitle = m[1].trim();
-      } catch (_) { /* unreadable — leave title null */ }
-    }
-
-    const buildDir = path.join(dir, 'Build');
-    let buildFileCount = 0;
-    let totalBytes = 0;
-    let hasNonEmptyFile = false;
-    if (fs.existsSync(buildDir)) {
-      for (const f of fs.readdirSync(buildDir)) {
-        const stat = fs.statSync(path.join(buildDir, f));
-        buildFileCount += 1;
-        totalBytes += stat.size;
-        if (stat.size > 0) hasNonEmptyFile = true;
-      }
-    }
-
-    const linkedSim = sims.find((s) => s.build_uuid === uuid);
-
-    return {
-      buildUuid: uuid,
-      hasIndexHtml,
-      detectedTitle,
-      buildFileCount,
-      totalBytes,
-      looksLikeStub: !hasIndexHtml || !hasNonEmptyFile,
-      currentlyLinkedTo: linkedSim ? { simulationId: linkedSim.id, title: linkedSim.title } : null,
-    };
-  });
-
-  let thumbFileNames = [];
-  try {
-    thumbFileNames = fs.readdirSync(thumbBase, { withFileTypes: true })
-      .filter((e) => e.isFile())
-      .map((e) => e.name);
-  } catch (_) { thumbFileNames = []; }
-
-  const storageThumbnails = thumbFileNames.map((filename) => {
-    const stat = fs.statSync(path.join(thumbBase, filename));
-    const baseName = filename.replace(/\.[^.]+$/, '');
-    const matchingSim = sims.find((s) => baseName === s.id || baseName === `${s.id}-regions`);
-    return {
-      filename,
-      bytes: stat.size,
-      matchesSimulationId:    matchingSim ? matchingSim.id    : null,
-      matchesSimulationTitle: matchingSim ? matchingSim.title : null,
-    };
-  });
-
-  return {
-    simulations: sims.map((s) => ({
-      id:           s.id,
-      title:        s.title,
-      buildUuid:    s.build_uuid,
-      thumbnailUrl: s.thumbnail_url,
-      isStubBuild:  s.build_validation?.stub === true,
-    })),
-    storageBuilds,
-    storageThumbnails,
-  };
-};
-
-/**
- * POST /simulation-catalogs/storage-relink
- * body: { mappings: [{ simulationId, buildUuid?, thumbnailFilename? }] }
- * Points existing simulation rows at real files already on the storage
- * volume. Validates each build folder / thumbnail file exists before
- * writing anything; per-mapping errors don't abort the rest of the batch.
- */
-exports.relinkSimulations = async (mappings, actor, baseUrl = '') => {
-  requireManageGlobal(actor);
-
-  if (!Array.isArray(mappings) || mappings.length === 0) {
-    throw ApiError.badRequest('mappings[] is required.');
-  }
-
-  const results = [];
-
-  for (const m of mappings) {
-    const { simulationId, buildUuid, thumbnailFilename } = m ?? {};
-    if (!simulationId) {
-      results.push({ simulationId: simulationId ?? null, success: false, error: 'simulationId is required.' });
-      continue;
-    }
-
-    const sim = await SimulationModel.findById(simulationId);
-    if (!sim) {
-      results.push({ simulationId, success: false, error: 'Simulation not found.' });
-      continue;
-    }
-
-    const updates = {};
-
-    if (buildUuid) {
-      const buildDir = webglSvc.getBuildPath(buildUuid);
-      if (!fs.existsSync(buildDir)) {
-        results.push({ simulationId, success: false, error: `Build folder not found: ${buildUuid}` });
-        continue;
-      }
-
-      let validation;
-      try {
-        validation = await webglSvc.validateWebGLStructure(buildDir);
-      } catch (err) {
-        results.push({ simulationId, success: false, error: `Validation failed: ${err.message}` });
-        continue;
-      }
-      if (!validation.checklist?.indexHtml) {
-        results.push({ simulationId, success: false, error: `No index.html found under ${buildUuid}.` });
-        continue;
-      }
-
-      let entryFile = 'index.html';
-      if (validation.checklist.wrapperFolder) {
-        const rel = path.relative(buildDir, validation.checklist.wrapperFolder);
-        entryFile = `${rel}/index.html`.replace(/\\/g, '/');
-      }
-
-      updates.build_uuid        = buildUuid;
-      updates.storage_path      = buildDir;
-      updates.public_entry_url  = webglSvc.getPublicEntryUrl(buildUuid, entryFile);
-      updates.entry_file        = entryFile;
-      updates.build_status      = 'ready';
-      updates.build_validation  = validation;
-      updates.launch_type       = 'webgl';
-    }
-
-    if (thumbnailFilename) {
-      const thumbPath = path.join(config.storage.thumbnailsDirAbs, thumbnailFilename);
-      if (!fs.existsSync(thumbPath)) {
-        results.push({ simulationId, success: false, error: `Thumbnail not found: ${thumbnailFilename}` });
-        continue;
-      }
-      updates.thumbnail_url = `${baseUrl}${config.storage.thumbnailsUrlPrefix}/${thumbnailFilename}`;
-    }
-
-    if (Object.keys(updates).length === 0) {
-      results.push({ simulationId, success: false, error: 'Provide buildUuid and/or thumbnailFilename.' });
-      continue;
-    }
-
-    const updated = await SimulationModel.update(simulationId, updates);
-
-    await AuditModel.log({
-      institutionId: actor.institutionId, actorId: actor.id, actorEmail: actor.email,
-      action: 'simulation.storage_relinked', entityType: 'Simulation', entityId: simulationId,
-      delta: {
-        before: { buildUuid: sim.build_uuid, thumbnailUrl: sim.thumbnail_url },
-        after:  updates,
-      },
-    }).catch(() => {});
-
-    results.push({ simulationId, title: sim.title, success: true, simulation: mapSimulation(updated) });
-  }
-
-  return { results };
 };

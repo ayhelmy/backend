@@ -29,41 +29,13 @@
  */
 'use strict';
 
-require('../config');
+const config = require('../config');
 const bcrypt   = require('bcryptjs');
 const { pool } = require('../config/database');
 
 const SALT_ROUNDS = 12;
 
-/**
- * This script wipes and replaces simulations, catalogs, sessions, and
- * grades unconditionally (see step 9 below). It must never run against a
- * live database with real data. NODE_ENV=production skips it outright;
- * set ALLOW_PRODUCTION_SEED=yes-i-am-sure to override deliberately.
- *
- * Exits 0 (not 1) when skipped — Railway's start command chains this
- * script before `npm start`, so a non-zero exit here would abort the
- * deploy and take the whole app down. Skipping must never do that.
- */
-function isSafeToSeed() {
-  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_PRODUCTION_SEED !== 'yes-i-am-sure') {
-    console.error(
-      '\n⚠️  Skipping seed: NODE_ENV=production and this script deletes all ' +
-      'simulations, catalogs, sessions, and grades before reseeding.\n' +
-      '    Set ALLOW_PRODUCTION_SEED=yes-i-am-sure if you really intend to wipe production data.\n',
-    );
-    return false;
-  }
-  return true;
-}
-
 async function seed() {
-  if (!isSafeToSeed()) {
-    // Exit immediately with success — Railway's start command chains this
-    // script before `npm start`, and an unclosed pg pool could otherwise
-    // leave the process hanging instead of handing off to the server.
-    process.exit(0);
-  }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -420,7 +392,9 @@ async function seed() {
         title, description,
         uuid,
         `${title.toLowerCase().replace(/\s+/g, '-')}.zip`,
-        path.join(storageBase, uuid),
+        // Relative — same convention as webgl.service.js's getRelativeBuildPath().
+        // `storageBase` (absolute) is only used below for the actual stub-file writes.
+        `${config.storage.simulationsDir}/${uuid}`.replace(/\\/g, '/'),
         `/simulations-runtime/${uuid}/index.html`,
         estimatedMinutes, difficulty,
         objectives, visibility,

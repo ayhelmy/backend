@@ -1,4 +1,4 @@
-storage/simulations/
+storage/
 node_modules/
 temp_patch/
 git-diff-files.txt

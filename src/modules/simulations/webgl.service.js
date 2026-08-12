@@ -26,7 +26,8 @@ const config = require('../../config');
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
 function getStorageBase() {
-  return config.storage.simulationsDirAbs;
+  const dir = config.storage.simulationsDir;
+  return path.isAbsolute(dir) ? dir : path.resolve(process.cwd(), dir);
 }
 
 function getBuildPath(buildUuid) {
@@ -36,6 +37,17 @@ function getBuildPath(buildUuid) {
 
 function getPublicEntryUrl(buildUuid, entryFile = 'index.html') {
   return `${config.storage.simulationsUrlPrefix}/${buildUuid}/${entryFile}`;
+}
+
+/**
+ * Portable, deployment-agnostic representation of where a build lives —
+ * for DB storage only. Deliberately NOT the same as getBuildPath(), which
+ * returns an OS-absolute filesystem path needed for actual fs operations;
+ * baking that absolute path into the database would break the moment the
+ * app moves to a different machine/container/drive.
+ */
+function getRelativeBuildPath(buildUuid) {
+  return `${config.storage.simulationsDir}/${buildUuid}`.replace(/\\/g, '/');
 }
 
 async function ensureStorageDir() {
@@ -190,6 +202,7 @@ async function cleanTempFile(zipPath) {
 module.exports = {
   getStorageBase,
   getBuildPath,
+  getRelativeBuildPath,
   getPublicEntryUrl,
   extractWebGLZip,
   validateWebGLStructure,

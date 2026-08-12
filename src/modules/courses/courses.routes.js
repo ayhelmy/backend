@@ -4,6 +4,7 @@
  * Courses routes — SRS §4.5 CRS-01 to CRS-10. RBAC v2.
  *
  * GET    /api/v1/courses               — scoped by role
+ * GET    /api/v1/courses/me/enrolled   — my actively-enrolled courses (any authenticated user)
  * POST   /api/v1/courses               — instructor only (courses.create)
  * GET    /api/v1/courses/:id           — public within institution
  * PATCH  /api/v1/courses/:id           — instructor (own) or admin
@@ -32,6 +33,8 @@ router.use(authenticate);
 // ── Catalog ───────────────────────────────────────────────────────────────────
 router.get('/',    requireAnyPermission('courses.view_all', 'courses.view_institution', 'courses.view_department', 'courses.view_own'), coursesController.list);
 router.post('/',   requirePermission('courses.create'), coursesValidators.create, validate, coursesController.create);
+// /me/enrolled MUST be registered before /:id to avoid param capture.
+router.get('/me/enrolled', coursesController.listMyEnrolled);
 router.get('/:id', requireAnyPermission('courses.view_all', 'courses.view_institution', 'courses.view_department', 'courses.view_own'), coursesController.getOne);
 
 // ── Mutations (ownership enforced by requireCourseOwnership) ──────────────────

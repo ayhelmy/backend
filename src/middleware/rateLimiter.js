@@ -59,7 +59,54 @@ const authLimiter = rateLimit({
   },
 });
 
+/**
+ * Limiter for QTI package import — bulk parsing/DB-writing operation, stricter
+ * than the default limiter but not as tight as auth (legitimate instructors may
+ * import several question banks in a session).
+ */
+const qtiImportLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: isProduction ? 10 : 500,
+
+  standardHeaders: true,
+  legacyHeaders: false,
+
+  skip: (req) => req.method === 'OPTIONS',
+
+  message: {
+    type: 'https://Bedo SimuLearn.com/errors/429',
+    title: 'Too many import requests',
+    status: 429,
+    detail: 'Too many QTI import requests, please try again later.',
+  },
+});
+
+/**
+ * Limiter for the public LTI OIDC login/launch endpoints. Generous compared
+ * to authLimiter: legitimate traffic here is many distinct students each
+ * making one login + one launch request through the same LMS during a class
+ * period, not repeated attempts by a single bad actor.
+ */
+const ltiLaunchLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: isProduction ? 300 : 5000,
+
+  standardHeaders: true,
+  legacyHeaders: false,
+
+  skip: (req) => req.method === 'OPTIONS',
+
+  message: {
+    type: 'https://Bedo SimuLearn.com/errors/429',
+    title: 'Too many LTI launch requests',
+    status: 429,
+    detail: 'Too many LTI launch requests, please try again later.',
+  },
+});
+
 module.exports = {
   defaultLimiter,
   authLimiter,
+  qtiImportLimiter,
+  ltiLaunchLimiter,
 };

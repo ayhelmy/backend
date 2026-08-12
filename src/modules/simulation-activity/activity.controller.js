@@ -117,6 +117,13 @@ exports.getClickStats = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
+exports.getStepBreakdown = async (req, res, next) => {
+  try {
+    const data = await svc.getStepBreakdown(req.params.sessionId, req.user);
+    ApiResponse.ok(res, 'Step breakdown.', data);
+  } catch (e) { next(e); }
+};
+
 exports.cleanupStaleSessions = async (req, res, next) => {
   try {
     const timeoutMinutes = parseInt(req.query.timeout_minutes, 10) || 5;

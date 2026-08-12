@@ -185,4 +185,84 @@ function handleLessonFileUpload(req, res, next) {
   });
 }
 
-module.exports = { handleZipUpload, handleImageUpload, handleClickRegionsUpload, handleLessonFileUpload };
+// ── QTI package upload (quiz import) ──────────────────────────────────────────
+
+const uploadQtiPackage = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, os.tmpdir()),
+    filename:    (_req, file, cb) => {
+      const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+      cb(null, `qtiimport_${Date.now()}_${safe}`);
+    },
+  }),
+  fileFilter: zipFilter, // same .zip + MIME checks as the WebGL upload
+  limits: { fileSize: config.storage.maxQtiUploadBytes },
+}).single('qti_package');
+
+function handleQtiUpload(req, res, next) {
+  uploadQtiPackage(req, res, (err) => {
+    if (!err) return next();
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        const maxMB = Math.round(config.storage.maxQtiUploadBytes / 1024 / 1024);
+        return res.status(413).json({
+          status: 413,
+          title: 'Payload Too Large',
+          detail: `QTI package exceeds the maximum upload size of ${maxMB} MB.`,
+        });
+      }
+      return res.status(400).json({ status: 400, title: 'Upload Error', detail: err.message });
+    }
+    return res.status(400).json({ status: 400, title: 'Upload Error', detail: err.message });
+  });
+}
+
+// ── Mail attachment upload ─────────────────────────────────────────────────────
+
+const ALLOWED_MAIL_ATTACHMENT_MIMES = [
+  'image/jpeg', 'image/png', 'image/webp', 'image/gif',
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'text/plain', 'text/csv',
+];
+
+const uploadMailAttachmentMulter = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, os.tmpdir()),
+    filename:    (_req, file, cb) => {
+      const ext = path.extname(file.originalname).toLowerCase() || '';
+      cb(null, `mailattach_${Date.now()}_${Math.random().toString(36).slice(2)}${ext}`);
+    },
+  }),
+  fileFilter: (_req, file, cb) => {
+    if (!ALLOWED_MAIL_ATTACHMENT_MIMES.includes(file.mimetype)) {
+      return cb(new Error(`File type "${file.mimetype}" is not allowed as a mail attachment.`));
+    }
+    cb(null, true);
+  },
+  limits: { fileSize: config.storage.maxMailAttachmentBytes },
+}).single('file');
+
+function handleMailAttachmentUpload(req, res, next) {
+  uploadMailAttachmentMulter(req, res, (err) => {
+    if (!err) return next();
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        const maxMB = Math.round(config.storage.maxMailAttachmentBytes / 1024 / 1024);
+        return res.status(413).json({ status: 413, title: 'File Too Large', detail: `Attachment exceeds the ${maxMB} MB limit.` });
+      }
+      return res.status(400).json({ status: 400, title: 'Upload Error', detail: err.message });
+    }
+    return res.status(400).json({ status: 400, title: 'Upload Error', detail: err.message });
+  });
+}
+
+module.exports = {
+  handleZipUpload, handleImageUpload, handleClickRegionsUpload, handleLessonFileUpload,
+  handleQtiUpload, handleMailAttachmentUpload,
+};

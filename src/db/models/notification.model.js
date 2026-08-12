@@ -1,44 +1,94 @@
 /**
- * Notification and message model.
- * SRS §4.12 NOT-01 – NOT-05 (in-app notifications).
- * SRS §4.13 MSG-01 – MSG-06 (direct and course messaging).
+ * Notification model.
+ * SRS §4.12 NOT-01 – NOT-05 (in-app notifications), extended (migration 053)
+ * with tenant/course scoping, priority, channel, and status.
  */
 'use strict';
 
 const { pool } = require('../../config/database');
 
 const NotificationModel = {
-  // ------------------------------------------------------------------
-  // Notifications
-  // ------------------------------------------------------------------
-
-  async create({ userId, type, title, body, referenceType, referenceId }) {
+  async create({
+    userId, type, title, body, referenceType, referenceId,
+    institutionId, departmentId, courseId, moduleId, lessonId, senderId,
+    priority, channel, data,
+  }) {
     const { rows } = await pool.query(
-      `INSERT INTO notifications (user_id, type, title, body, reference_type, reference_id)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-      [userId, type, title, body ?? null, referenceType ?? null, referenceId ?? null],
+      `INSERT INTO notifications
+         (user_id, type, title, body, reference_type, reference_id,
+          institution_id, department_id, course_id, module_id, lesson_id, sender_id,
+          priority, channel, data)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+       RETURNING *`,
+      [userId, type, title, body ?? null, referenceType ?? null, referenceId ?? null,
+       institutionId ?? null, departmentId ?? null, courseId ?? null, moduleId ?? null,
+       lessonId ?? null, senderId ?? null,
+       priority ?? 'normal', channel ?? 'in_app', data ? JSON.stringify(data) : null],
     );
     return rows[0];
   },
 
-  async listForUser(userId, { unreadOnly = false, limit = 20, offset = 0 } = {}) {
-    const params = [userId, limit, offset];
-    const unread = unreadOnly ? 'AND is_read = FALSE' : '';
+  /** Bulk-insert one notification per recipient in a single round trip. */
+  async createMany(rowsIn) {
+    if (!rowsIn.length) return [];
+    const cols = ['user_id', 'type', 'title', 'body', 'reference_type', 'reference_id',
+      'institution_id', 'department_id', 'course_id', 'module_id', 'lesson_id', 'sender_id',
+      'priority', 'channel', 'data'];
+    const params = [];
+    const valuesSql = rowsIn.map((r) => {
+      const vals = [
+        r.userId, r.type, r.title, r.body ?? null, r.referenceType ?? null, r.referenceId ?? null,
+        r.institutionId ?? null, r.departmentId ?? null, r.courseId ?? null, r.moduleId ?? null,
+        r.lessonId ?? null, r.senderId ?? null,
+        r.priority ?? 'normal', r.channel ?? 'in_app', r.data ? JSON.stringify(r.data) : null,
+      ];
+      const placeholders = vals.map((v) => `$${params.push(v)}`);
+      return `(${placeholders.join(',')})`;
+    }).join(',');
+
     const { rows } = await pool.query(
-      `SELECT id, type, title, body, reference_type, reference_id,
-              is_read, read_at, created_at
-         FROM notifications
-        WHERE user_id = $1 ${unread}
-        ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+      `INSERT INTO notifications (${cols.join(', ')}) VALUES ${valuesSql} RETURNING *`,
       params,
     );
     return rows;
   },
 
+  async listForUser(userId, { status, type, priority, limit = 20, offset = 0 } = {}) {
+    const params = [userId];
+    const filters = [`user_id = $1`];
+    if (status)   filters.push(`status = $${params.push(status)}`);
+    if (type)     filters.push(`type = $${params.push(type)}`);
+    if (priority) filters.push(`priority = $${params.push(priority)}`);
+    params.push(limit, offset);
+
+    const { rows } = await pool.query(
+      `SELECT id, type, title, body, reference_type, reference_id,
+              institution_id, department_id, course_id, module_id, lesson_id, sender_id,
+              priority, channel, data, status, is_read, read_at, created_at, updated_at
+         FROM notifications
+        WHERE ${filters.join(' AND ')}
+        ORDER BY created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
+    );
+    return rows;
+  },
+
+  async count(userId, { status, type, priority } = {}) {
+    const params = [userId];
+    const filters = [`user_id = $1`];
+    if (status)   filters.push(`status = $${params.push(status)}`);
+    if (type)     filters.push(`type = $${params.push(type)}`);
+    if (priority) filters.push(`priority = $${params.push(priority)}`);
+    const { rows } = await pool.query(
+      `SELECT COUNT(*) AS total FROM notifications WHERE ${filters.join(' AND ')}`,
+      params,
+    );
+    return parseInt(rows[0].total, 10);
+  },
+
   async unreadCount(userId) {
     const { rows } = await pool.query(
-      `SELECT COUNT(*) AS total FROM notifications
-        WHERE user_id = $1 AND is_read = FALSE`,
+      `SELECT COUNT(*) AS total FROM notifications WHERE user_id = $1 AND status = 'unread'`,
       [userId],
     );
     return parseInt(rows[0].total, 10);
@@ -46,8 +96,8 @@ const NotificationModel = {
 
   async markRead(id, userId) {
     const { rows } = await pool.query(
-      `UPDATE notifications SET is_read = TRUE, read_at = NOW()
-        WHERE id = $1 AND user_id = $2 AND is_read = FALSE
+      `UPDATE notifications SET status = 'read', is_read = TRUE, read_at = NOW(), updated_at = NOW()
+        WHERE id = $1 AND user_id = $2 AND status = 'unread'
         RETURNING id`,
       [id, userId],
     );
@@ -56,111 +106,30 @@ const NotificationModel = {
 
   async markAllRead(userId) {
     const { rows } = await pool.query(
-      `UPDATE notifications SET is_read = TRUE, read_at = NOW()
-        WHERE user_id = $1 AND is_read = FALSE
-        RETURNING COUNT(*)`,
+      `UPDATE notifications SET status = 'read', is_read = TRUE, read_at = NOW(), updated_at = NOW()
+        WHERE user_id = $1 AND status = 'unread'
+        RETURNING id`,
       [userId],
     );
     return rows.length;
   },
 
-  // ------------------------------------------------------------------
-  // Message threads and messages
-  // ------------------------------------------------------------------
-
-  async findThreadById(threadId) {
+  async archive(id, userId) {
     const { rows } = await pool.query(
-      `SELECT id, subject, thread_type, course_id, created_by, created_at, updated_at
-         FROM message_threads WHERE id = $1`,
-      [threadId],
-    );
-    return rows[0] ?? null;
-  },
-
-  async createThread({ subject, threadType, courseId, createdBy }) {
-    const { rows } = await pool.query(
-      `INSERT INTO message_threads (subject, thread_type, course_id, created_by)
-       VALUES ($1,$2,$3,$4) RETURNING *`,
-      [subject ?? null, threadType ?? 'direct', courseId ?? null, createdBy],
-    );
-    return rows[0];
-  },
-
-  async addParticipant(threadId, userId) {
-    await pool.query(
-      `INSERT INTO thread_participants (thread_id, user_id)
-       VALUES ($1,$2) ON CONFLICT DO NOTHING`,
-      [threadId, userId],
-    );
-  },
-
-  async isParticipant(threadId, userId) {
-    const { rows } = await pool.query(
-      `SELECT 1 FROM thread_participants WHERE thread_id = $1 AND user_id = $2`,
-      [threadId, userId],
-    );
-    return rows.length > 0;
-  },
-
-  async listThreadsForUser(userId, { limit = 20, offset = 0 } = {}) {
-    const { rows } = await pool.query(
-      `SELECT t.id, t.subject, t.thread_type, t.course_id, t.updated_at,
-              tp.last_read_at,
-              (SELECT body FROM messages m
-                WHERE m.thread_id = t.id AND m.deleted_at IS NULL
-                ORDER BY m.created_at DESC LIMIT 1) AS last_message
-         FROM thread_participants tp
-         JOIN message_threads t ON t.id = tp.thread_id
-        WHERE tp.user_id = $1
-        ORDER BY t.updated_at DESC LIMIT $2 OFFSET $3`,
-      [userId, limit, offset],
-    );
-    return rows;
-  },
-
-  async sendMessage({ threadId, senderId, body, attachmentUrl }) {
-    const { rows } = await pool.query(
-      `INSERT INTO messages (thread_id, sender_id, body, attachment_url)
-       VALUES ($1,$2,$3,$4) RETURNING *`,
-      [threadId, senderId, body, attachmentUrl ?? null],
-    );
-    // Bump thread.updated_at
-    await pool.query(
-      `UPDATE message_threads SET updated_at = NOW() WHERE id = $1`,
-      [threadId],
-    );
-    return rows[0];
-  },
-
-  async listMessages(threadId, { limit = 50, offset = 0 } = {}) {
-    const { rows } = await pool.query(
-      `SELECT m.id, m.sender_id, m.body, m.attachment_url, m.created_at,
-              u.first_name, u.last_name, u.avatar_url
-         FROM messages m
-         JOIN users u ON u.id = m.sender_id
-        WHERE m.thread_id = $1 AND m.deleted_at IS NULL
-        ORDER BY m.created_at ASC LIMIT $2 OFFSET $3`,
-      [threadId, limit, offset],
-    );
-    return rows;
-  },
-
-  async softDeleteMessage(messageId, userId) {
-    const { rows } = await pool.query(
-      `UPDATE messages SET deleted_at = NOW()
-        WHERE id = $1 AND sender_id = $2 AND deleted_at IS NULL
+      `UPDATE notifications SET status = 'archived', updated_at = NOW()
+        WHERE id = $1 AND user_id = $2 AND status != 'archived'
         RETURNING id`,
-      [messageId, userId],
+      [id, userId],
     );
     return rows[0] ?? null;
   },
 
-  async updateLastRead(threadId, userId) {
-    await pool.query(
-      `UPDATE thread_participants SET last_read_at = NOW()
-        WHERE thread_id = $1 AND user_id = $2`,
-      [threadId, userId],
+  async remove(id, userId) {
+    const { rows } = await pool.query(
+      `DELETE FROM notifications WHERE id = $1 AND user_id = $2 RETURNING id`,
+      [id, userId],
     );
+    return rows[0] ?? null;
   },
 };
 

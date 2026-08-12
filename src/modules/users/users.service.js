@@ -13,7 +13,7 @@ const { sendVerificationEmail, sendInviteEmail }              = require('../../u
 const { parsePagination, buildPaginationMeta }               = require('../../utils/pagination');
 const ApiError        = require('../../utils/apiError');
 const { parse: csvParse } = require('csv-parse/sync');
-const { ROLES, ASSIGNABLE_ROLES, SUPER_ONLY_ROLES } = require('../../constants/roles');
+const { ROLES, ASSIGNABLE_ROLES, SUPER_ONLY_ROLES, ROLE_RANK } = require('../../constants/roles');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -52,17 +52,6 @@ async function revokeAllSessions(userId) {
 
 // Roles that can be assigned by institution_admin or higher
 const VALID_ASSIGNABLE_ROLES = [...ASSIGNABLE_ROLES, ...SUPER_ONLY_ROLES];
-
-// Numeric rank — lower number means higher privilege in the hierarchy
-const ROLE_RANK = {
-  [ROLES.SUPER_ADMIN]:        0,
-  [ROLES.INSTITUTION_ADMIN]:  1,
-  [ROLES.DEPT_MANAGER]:       2,
-  [ROLES.INSTRUCTOR]:         3,
-  [ROLES.TEACHING_ASSISTANT]: 4,
-  [ROLES.STUDENT]:            5,
-  [ROLES.GUEST]:              6,
-};
 
 /**
  * Returns role names that are strictly higher-ranked than the actor's best role.
@@ -207,6 +196,56 @@ exports.list = async (query, actor) => {
     users: listResult.rows.map(mapUser),
     meta:  buildPaginationMeta(total, page, limit),
   };
+};
+
+// ── countByStatus ─────────────────────────────────────────────────────────────
+// Small aggregate for KPI cards — counts users grouped by status, scoped by
+// institution/department. Used by institution_admin and dept_manager dashboards.
+
+exports.countByStatus = async ({ institutionId, departmentIds } = {}) => {
+  const params = [];
+  const filters = ['u.deleted_at IS NULL'];
+  if (institutionId) filters.push(`u.institution_id = $${params.push(institutionId)}`);
+  if (departmentIds?.length) {
+    filters.push(`u.id IN (
+      SELECT DISTINCT e.user_id FROM enrollments e
+        JOIN courses c ON c.id = e.course_id
+       WHERE c.department_id = ANY($${params.push(departmentIds)}) AND c.deleted_at IS NULL
+    )`);
+  }
+  const { rows } = await pool.query(
+    `SELECT u.status, COUNT(*) AS total FROM users u WHERE ${filters.join(' AND ')} GROUP BY u.status`,
+    params,
+  );
+  const byStatus = { active: 0, suspended: 0, pending: 0 };
+  rows.forEach((r) => { byStatus[r.status] = parseInt(r.total, 10); });
+  byStatus.total = Object.values(byStatus).reduce((a, b) => a + b, 0);
+  return byStatus;
+};
+
+// Users (student or instructor role context) with no current row in
+// user_academic_assignments — institution_admin "users missing academic
+// assignment" follow-up.
+exports.usersMissingAcademicAssignment = async ({ institutionId, limit = 20 } = {}) => {
+  const { rows } = await pool.query(
+    `SELECT u.id, u.email, u.first_name, u.last_name,
+            COALESCE(JSON_AGG(r.name) FILTER (WHERE r.name IS NOT NULL), '[]') AS role_names
+       FROM users u
+       JOIN user_roles ur ON ur.user_id = u.id
+       JOIN roles r ON r.id = ur.role_id AND r.name IN ('student', 'instructor', 'teaching_assistant')
+      WHERE u.institution_id = $1 AND u.deleted_at IS NULL AND u.status = 'active'
+        AND NOT EXISTS (
+          SELECT 1 FROM user_academic_assignments uaa
+           WHERE uaa.user_id = u.id AND uaa.is_current = true
+        )
+      GROUP BY u.id
+      ORDER BY u.created_at DESC
+      LIMIT $2`,
+    [institutionId, limit],
+  );
+  return rows.map((r) => ({
+    id: r.id, email: r.email, firstName: r.first_name, lastName: r.last_name, roles: r.role_names,
+  }));
 };
 
 // ── getOne ────────────────────────────────────────────────────────────────────

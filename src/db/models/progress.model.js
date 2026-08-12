@@ -130,6 +130,24 @@ const ProgressModel = {
     return rows[0];
   },
 
+  /** Completed vs. pending required-lesson counts across a student's given courses. */
+  async countLessonStatusForUser(userId, courseIds) {
+    if (!courseIds?.length) return { completed: 0, pending: 0 };
+    const { rows } = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE lp.status = 'completed')             AS completed,
+         COUNT(*) FILTER (WHERE lp.status IS NULL OR lp.status != 'completed') AS pending
+         FROM lessons l
+         LEFT JOIN lesson_progress lp ON lp.lesson_id = l.id AND lp.user_id = $1
+        WHERE l.course_id = ANY($2) AND l.is_required = true`,
+      [userId, courseIds],
+    );
+    return {
+      completed: parseInt(rows[0]?.completed ?? 0, 10),
+      pending: parseInt(rows[0]?.pending ?? 0, 10),
+    };
+  },
+
   /** Snapshot of all progress for a student — used by dashboard PRG-05 widget. */
   async dashboardSnapshot(userId) {
     const { rows } = await pool.query(

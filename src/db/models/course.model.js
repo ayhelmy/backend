@@ -13,19 +13,24 @@ const COURSE_COLS = `
   c.instructor_id, c.code, c.title, c.description, c.thumbnail_url,
   c.status, c.enrollment_type, c.enrollment_cap, c.start_date, c.end_date,
   c.passing_grade, c.settings, c.published_at, c.created_by,
-  c.created_at, c.updated_at
+  c.created_at, c.updated_at,
+  (SELECT COUNT(*) FROM enrollments e
+    WHERE e.course_id = c.id AND e.role = 'student' AND e.status = 'active') AS enrolled_count,
+  (SELECT COUNT(*) FROM course_modules cm WHERE cm.course_id = c.id) AS module_count
 `;
 
 const COURSE_JOIN_COLS = `
   d.name  AS department_name,  d.code AS department_code,
   ay.name AS academic_year_name,
-  st.name AS semester_term_name
+  st.name AS semester_term_name,
+  i.first_name AS instructor_first_name, i.last_name AS instructor_last_name
 `;
 
 const COURSE_JOINS = `
   LEFT JOIN departments    d  ON d.id  = c.department_id    AND d.deleted_at  IS NULL
   LEFT JOIN academic_years ay ON ay.id = c.academic_year_id AND ay.deleted_at IS NULL
   LEFT JOIN semester_terms st ON st.id = c.semester_term_id AND st.deleted_at IS NULL
+  LEFT JOIN users i ON i.id = c.instructor_id
 `;
 
 const CourseModel = {
@@ -39,7 +44,38 @@ const CourseModel = {
     return rows[0] ?? null;
   },
 
-  async list({ institutionId, departmentId, academicYearId, semesterTermId, status, instructorId, domainId, search, limit = 20, offset = 0 } = {}) {
+  /**
+   * Courses a user is actively enrolled in, regardless of current-term filtering —
+   * `list()` above is the "browse the catalog" view (scoped to the student's current
+   * semester term), which is the wrong source for "my grades"/"my courses" since a
+   * student can have active enrollments outside their current term assignment.
+   */
+  async listEnrolledByUser(userId) {
+    const { rows } = await pool.query(
+      `SELECT ${COURSE_COLS}, ${COURSE_JOIN_COLS}
+       FROM courses c ${COURSE_JOINS}
+       JOIN enrollments e ON e.course_id = c.id
+       WHERE e.user_id = $1 AND e.status = 'active' AND c.deleted_at IS NULL
+       ORDER BY c.title`,
+      [userId],
+    );
+    return rows;
+  },
+
+  /** Courses by explicit ID list — used for teaching-assistant assignments (no instructor_id/department_id filter applies). */
+  async listByIds(ids) {
+    if (!ids?.length) return [];
+    const { rows } = await pool.query(
+      `SELECT ${COURSE_COLS}, ${COURSE_JOIN_COLS}
+       FROM courses c ${COURSE_JOINS}
+       WHERE c.id = ANY($1) AND c.deleted_at IS NULL
+       ORDER BY c.created_at DESC`,
+      [ids],
+    );
+    return rows;
+  },
+
+  async list({ institutionId, departmentId, departmentIds, academicYearId, semesterTermId, status, instructorId, domainId, search, limit = 20, offset = 0 } = {}) {
     const params = [limit, offset];
     const filters = ['c.deleted_at IS NULL'];
 
@@ -50,6 +86,7 @@ const CourseModel = {
     }
 
     if (departmentId)   filters.push(`c.department_id = $${params.push(departmentId)}`);
+    if (departmentIds?.length) filters.push(`c.department_id = ANY($${params.push(departmentIds)})`);
     if (academicYearId) filters.push(`c.academic_year_id = $${params.push(academicYearId)}`);
     if (semesterTermId) filters.push(`c.semester_term_id = $${params.push(semesterTermId)}`);
     if (status)         filters.push(`c.status = $${params.push(status)}`);
@@ -64,6 +101,43 @@ const CourseModel = {
        FROM courses c ${COURSE_JOINS}
        WHERE ${filters.join(' AND ')}
        ORDER BY c.created_at DESC LIMIT $1 OFFSET $2`,
+      params,
+    );
+    return rows;
+  },
+
+  /** Lightweight COUNT(*) for KPI cards — no row fetch. */
+  async countByFilters({ institutionId, departmentId, departmentIds, academicYearId, semesterTermId, status, instructorId } = {}) {
+    const params = [];
+    const filters = ['c.deleted_at IS NULL'];
+    if (institutionId)   filters.push(`c.institution_id = $${params.push(institutionId)}`);
+    if (departmentId)    filters.push(`c.department_id = $${params.push(departmentId)}`);
+    if (departmentIds?.length) filters.push(`c.department_id = ANY($${params.push(departmentIds)})`);
+    if (academicYearId)  filters.push(`c.academic_year_id = $${params.push(academicYearId)}`);
+    if (semesterTermId)  filters.push(`c.semester_term_id = $${params.push(semesterTermId)}`);
+    if (status)          filters.push(`c.status = $${params.push(status)}`);
+    if (instructorId)    filters.push(`c.instructor_id = $${params.push(instructorId)}`);
+    const { rows } = await pool.query(
+      `SELECT COUNT(*) AS total FROM courses c WHERE ${filters.join(' AND ')}`,
+      params,
+    );
+    return parseInt(rows[0].total, 10);
+  },
+
+  /** Courses with zero course_modules rows — "courses without modules" follow-up. */
+  async listWithoutModules({ institutionId, departmentId, instructorId, limit = 20 } = {}) {
+    const params = [];
+    const filters = ['c.deleted_at IS NULL', `c.status != $${params.push('archived')}`];
+    if (institutionId) filters.push(`c.institution_id = $${params.push(institutionId)}`);
+    if (departmentId)  filters.push(`c.department_id = $${params.push(departmentId)}`);
+    if (instructorId)  filters.push(`c.instructor_id = $${params.push(instructorId)}`);
+    params.push(limit);
+    const { rows } = await pool.query(
+      `SELECT c.id, c.title, c.status, c.instructor_id
+         FROM courses c
+        WHERE ${filters.join(' AND ')}
+          AND NOT EXISTS (SELECT 1 FROM course_modules cm WHERE cm.course_id = c.id)
+        ORDER BY c.created_at DESC LIMIT $${params.length}`,
       params,
     );
     return rows;

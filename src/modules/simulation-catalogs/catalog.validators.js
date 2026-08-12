@@ -77,6 +77,8 @@ exports.createSimulationInCatalog = [
   body('maxAttempts').optional().isInt({ min: 0 }).withMessage('maxAttempts must be a non-negative integer'),
   body('estimatedMinutes').optional({ nullable: true }).isInt({ min: 1 }).withMessage('estimatedMinutes must be a positive integer'),
   body('version').optional().isString(),
+  body('isFeatured').optional().isBoolean().withMessage('isFeatured must be a boolean'),
+  body('featuredOrder').optional({ nullable: true }).isInt({ min: 0 }).withMessage('featuredOrder must be a non-negative integer'),
 ];
 
 // ── WebGL ZIP upload ──────────────────────────────────────────────────────────
@@ -119,4 +121,6 @@ exports.updateSimulationInCatalog = [
   body('maxAttempts').optional().isInt({ min: 0 }).withMessage('maxAttempts must be a non-negative integer'),
   body('estimatedMinutes').optional({ nullable: true }).isInt({ min: 1 }).withMessage('estimatedMinutes must be a positive integer'),
   body('version').optional().isString(),
+  body('isFeatured').optional().isBoolean().withMessage('isFeatured must be a boolean'),
+  body('featuredOrder').optional({ nullable: true }).isInt({ min: 0 }).withMessage('featuredOrder must be a non-negative integer'),
 ];

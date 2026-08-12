@@ -119,6 +119,12 @@ router.get(
   ctrl.getClickStats,
 );
 
+router.get(
+  '/simulation-activity/:sessionId/steps',
+  requirePermission('lessons.view'),
+  ctrl.getStepBreakdown,
+);
+
 // ── Admin: cleanup stale sessions (super_admin only) ─────────────────────────
 router.post(
   '/simulation-activity/cleanup',

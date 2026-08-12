@@ -3,34 +3,9 @@
 const svc         = require('./simulations.service');
 const ApiResponse = require('../../utils/apiResponse');
 
-function getRequestProtocol(req) {
-  const forwarded = req.headers['x-forwarded-proto'];
-  if (forwarded) {
-    return forwarded.split(',')[0].trim();
-  }
-  return req.protocol;
-}
-
-function buildSecureLaunchUrl(sim, req) {
-  if (sim.launchUrl) {
-    return sim.launchUrl;
-  }
-  if (!sim.publicEntryUrl) {
-    return null;
-  }
-  return `${getRequestProtocol(req)}://${req.get('host')}${sim.publicEntryUrl}`;
-}
-
-function ensureLaunchUrls(sim, req) {
-  return {
-    ...sim,
-    launchUrl: buildSecureLaunchUrl(sim, req),
-  };
-}
-
-exports.list    = async (req, res, next) => { try { const r = await svc.list(req.query, req.user ?? null); const sims = r.simulations.map((sim) => ensureLaunchUrls(sim, req)); ApiResponse.ok(res, 'Simulations', sims, r.meta); } catch (e) { next(e); } };
+exports.list    = async (req, res, next) => { try { const r = await svc.list(req.query, req.user ?? null); ApiResponse.ok(res, 'Simulations', r.simulations, r.meta); } catch (e) { next(e); } };
 exports.create  = async (req, res, next) => { try { ApiResponse.created(res, 'Simulation created', await svc.create(req.body, req.user)); } catch (e) { next(e); } };
-exports.getOne  = async (req, res, next) => { try { const sim = await svc.getOne(req.params.id, req.user ?? null); ApiResponse.ok(res, 'Simulation', ensureLaunchUrls(sim, req)); } catch (e) { next(e); } };
+exports.getOne  = async (req, res, next) => { try { ApiResponse.ok(res, 'Simulation', await svc.getOne(req.params.id, req.user ?? null)); } catch (e) { next(e); } };
 exports.update  = async (req, res, next) => { try { ApiResponse.ok(res, 'Simulation updated', await svc.update(req.params.id, req.body, req.user)); } catch (e) { next(e); } };
 exports.remove  = async (req, res, next) => { try { await svc.remove(req.params.id, req.user); ApiResponse.noContent(res); } catch (e) { next(e); } };
 exports.preview = async (req, res, next) => { try { ApiResponse.ok(res, 'Preview URL', await svc.getPreviewUrl(req.params.id, req.user ?? null)); } catch (e) { next(e); } };

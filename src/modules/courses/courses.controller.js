@@ -8,6 +8,7 @@ const ApiError    = require('../../utils/apiError');
 const { ROLES }   = require('../../constants/roles');
 
 exports.list              = async (req, res, next) => { try { const r = await svc.list(req.query, req.user); ApiResponse.ok(res, 'Courses', r.courses, r.meta); } catch (e) { next(e); } };
+exports.listMyEnrolled    = async (req, res, next) => { try { ApiResponse.ok(res, 'My enrolled courses', await svc.listMyEnrolled(req.user)); } catch (e) { next(e); } };
 exports.create            = async (req, res, next) => { try { ApiResponse.created(res, 'Course created', await svc.create(req.body, req.user)); } catch (e) { next(e); } };
 exports.getOne            = async (req, res, next) => { try { ApiResponse.ok(res, 'Course', await svc.getOne(req.params.id, req.user)); } catch (e) { next(e); } };
 exports.update            = async (req, res, next) => { try { ApiResponse.ok(res, 'Course updated', await svc.update(req.params.id, req.body, req.user)); } catch (e) { next(e); } };

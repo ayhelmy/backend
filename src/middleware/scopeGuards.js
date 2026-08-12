@@ -23,7 +23,9 @@ const { ROLES }   = require('../constants/roles');
  * Must run after authenticate.
  */
 const loadCourse = async (req, _res, next) => {
-  const courseId = req.params.id ?? req.params.courseId;
+  // :courseId must win when a route also has its own :id (e.g. simulation-scores/:id,
+  // grade-categories/:id) — otherwise this looks up a course by the *other* resource's id.
+  const courseId = req.params.courseId ?? req.params.id;
   try {
     const { rows } = await pool.query(
       `SELECT id, institution_id, department_id, instructor_id, status

@@ -19,17 +19,23 @@ exports.updateModule = [
   body('prerequisiteModuleId').optional({ nullable: true }).isUUID(),
 ];
 
+const LESSON_MODES = [
+  'content', 'simulation', 'content_and_simulation',
+  'quiz', 'content_and_quiz', 'simulation_and_quiz', 'content_simulation_and_quiz',
+];
+
 exports.createLesson = [
   body('title').trim().notEmpty().withMessage('Lesson title is required.'),
   body('lessonMode')
-    .isIn(['content', 'simulation', 'content_and_simulation'])
-    .withMessage('lessonMode must be content, simulation, or content_and_simulation.'),
+    .isIn(LESSON_MODES)
+    .withMessage(`lessonMode must be one of: ${LESSON_MODES.join(', ')}.`),
   body('contentType')
     .optional({ nullable: true })
     .isIn(['rich_text', 'video', 'file', 'url', 'scorm'])
     .withMessage('contentType must be rich_text, video, file, url, or scorm.'),
   body('simulationId').optional({ nullable: true }).isUUID(),
   body('catalogId').optional({ nullable: true }).isUUID(),
+  body('quizId').optional({ nullable: true }).isUUID(),
   body('content').optional().isObject(),
   body('position').optional().isInt({ min: 0 }),
   body('estimatedMinutes').optional({ nullable: true }).isInt({ min: 1 }),
@@ -41,12 +47,13 @@ exports.updateLesson = [
   body('title').optional().trim().notEmpty(),
   body('lessonMode')
     .optional()
-    .isIn(['content', 'simulation', 'content_and_simulation']),
+    .isIn(LESSON_MODES),
   body('contentType')
     .optional({ nullable: true })
     .isIn(['rich_text', 'video', 'file', 'url', 'scorm']),
   body('simulationId').optional({ nullable: true }).isUUID(),
   body('catalogId').optional({ nullable: true }).isUUID(),
+  body('quizId').optional({ nullable: true }).isUUID(),
   body('content').optional().isObject(),
   body('estimatedMinutes').optional({ nullable: true }).isInt({ min: 1 }),
   body('isRequired').optional().isBoolean(),

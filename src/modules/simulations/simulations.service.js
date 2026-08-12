@@ -58,6 +58,8 @@ function mapSim(row) {
     buildStatus:          row.build_status         ?? null,
     buildValidation:      row.build_validation     ?? null,
     fileSizeBytes:        row.file_size_bytes      ?? null,
+    isFeatured:           row.is_featured          ?? false,
+    featuredOrder:        row.featured_order       ?? null,
     createdAt:            row.created_at,
     updatedAt:            row.updated_at           ?? null,
   };
@@ -105,10 +107,7 @@ exports.list = async (query, actor) => {
     params.push(limit, offset);
     const result = await pool.query(
       `SELECT id, title, description, type, thumbnail_url, estimated_minutes,
-              difficulty, visibility, status, version, institution_id,
-              launch_type, build_uuid, original_zip_filename, storage_path,
-              public_entry_url, entry_file, build_status, build_validation,
-              file_size_bytes, created_at
+              difficulty, visibility, status, version, institution_id, created_at
          FROM simulations
         WHERE ${filters.join(' AND ')}
         ORDER BY title
@@ -187,9 +186,7 @@ exports.list = async (query, actor) => {
     const where = whereParts.join(' AND ');
     const cols  = `s.id, s.title, s.description, s.type, s.thumbnail_url,
                    s.estimated_minutes, s.difficulty, s.visibility, s.status, s.version,
-                   s.launch_type, s.build_uuid, s.original_zip_filename, s.storage_path,
-                   s.public_entry_url, s.entry_file, s.build_status, s.build_validation,
-                   s.file_size_bytes, s.created_at`;
+                   s.launch_type, s.build_status, s.created_at`;
 
     const { rows: countRows } = await pool.query(
       `SELECT COUNT(DISTINCT s.id) AS total FROM simulations s ${joinClause} WHERE ${where}`,
@@ -269,13 +266,21 @@ exports.create = async (body, actor) => {
     createdBy:          actor.id,
   });
 
+  let finalSim = sim;
+  if (body.isFeatured !== undefined || body.featuredOrder !== undefined) {
+    finalSim = await SimulationModel.update(sim.id, {
+      is_featured:    body.isFeatured,
+      featured_order: body.featuredOrder,
+    });
+  }
+
   await AuditModel.log({
     institutionId: actor.institutionId, actorId: actor.id, actorEmail: actor.email,
     action: 'simulation.create', entityType: 'Simulation', entityId: sim.id,
     delta: { after: { title: sim.title, visibility: sim.visibility } },
   });
 
-  return mapSim(sim);
+  return mapSim(finalSim);
 };
 
 // ── update ────────────────────────────────────────────────────────────────────
@@ -298,6 +303,8 @@ exports.update = async (id, body, actor) => {
     launch_url:    body.launchUrl,
     thumbnail_url: body.thumbnailUrl,
     domain_id:     body.domainId,
+    is_featured:    body.isFeatured,
+    featured_order: body.featuredOrder,
   });
 
   await AuditModel.log({
@@ -397,9 +404,7 @@ exports.listDemo = async (query) => {
   const { rows } = await pool.query(
     `SELECT DISTINCT s.id, s.title, s.description, s.type, s.thumbnail_url, s.estimated_minutes,
             s.difficulty, s.visibility, s.status, s.version, s.learning_objectives,
-            s.launch_type, s.build_uuid, s.original_zip_filename, s.storage_path,
-            s.public_entry_url, s.entry_file, s.build_status, s.build_validation,
-            s.file_size_bytes, s.created_at
+            s.launch_type, s.build_status, s.created_at
        FROM simulations s ${joinClause}
       WHERE ${where}
       ORDER BY s.title
@@ -417,6 +422,39 @@ exports.listDemo = async (query) => {
     simulations: rows.map(mapSim),
     meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
   };
+};
+
+// ── listFeaturedPublic ───────────────────────────────────────────────────────
+// Curated home-page "Featured Simulations" section — public, no auth.
+
+exports.listFeaturedPublic = async () => {
+  const { rows } = await pool.query(`
+    SELECT s.id, s.title, s.description, s.type, s.thumbnail_url, s.estimated_minutes,
+           s.difficulty, s.visibility, s.status, s.version, s.launch_type, s.build_status,
+           s.is_featured, s.featured_order, s.created_at,
+           disc.name AS discipline_name
+      FROM simulations s
+      LEFT JOIN LATERAL (
+        SELECT root.name
+          FROM simulation_catalog_items sci
+          JOIN simulation_catalogs sc   ON sc.id = sci.catalog_id AND sc.deleted_at IS NULL
+          JOIN simulation_catalogs root ON root.id = COALESCE(sc.root_catalog_id, sc.id) AND root.deleted_at IS NULL
+         WHERE sci.simulation_id = s.id
+         ORDER BY root.name
+         LIMIT 1
+      ) disc ON TRUE
+     WHERE s.is_featured = TRUE
+       AND s.status = 'active'
+       AND s.visibility IN ('demo_public', 'demo_and_institution')
+       AND s.deleted_at IS NULL
+     ORDER BY s.featured_order NULLS LAST, s.title
+     LIMIT 8
+  `);
+
+  return rows.map((row) => ({
+    ...mapSim(row),
+    discipline: row.discipline_name ?? null,
+  }));
 };
 
 // ── demoLaunch ────────────────────────────────────────────────────────────────

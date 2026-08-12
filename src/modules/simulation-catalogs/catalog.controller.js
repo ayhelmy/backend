@@ -37,8 +37,8 @@ exports.createSimulationInCatalog    = async (req, res, next) => { try { ApiResp
 exports.getCatalogSimulations        = async (req, res, next) => { try { ApiResponse.ok(res, 'Catalog simulations', await svc.getCatalogSimulations(req.params.id, req.query, req.user)); } catch (e) { next(e); } };
 exports.updateCatalogSimulation      = async (req, res, next) => { try { ApiResponse.ok(res, 'Simulation updated', await svc.updateCatalogSimulation(req.params.id, req.params.simId, req.body, req.user)); } catch (e) { next(e); } };
 exports.removeCatalogSimulation      = async (req, res, next) => { try { await svc.removeCatalogSimulation(req.params.id, req.params.simId, req.user); ApiResponse.noContent(res); } catch (e) { next(e); } };
-exports.uploadSimulationThumbnail    = async (req, res, next) => { try { const baseUrl = `${req.protocol}://${req.get('host')}`; ApiResponse.ok(res, 'Thumbnail uploaded', await svc.uploadSimulationThumbnail(req.params.id, req.params.simId, req.file, req.user, baseUrl)); } catch (e) { next(e); } };
-exports.uploadClickRegions           = async (req, res, next) => { try { const baseUrl = `${req.protocol}://${req.get('host')}`; ApiResponse.ok(res, 'Click regions uploaded', await svc.uploadClickRegions(req.params.id, req.params.simId, req.file, req.body.regions, req.user, baseUrl)); } catch (e) { next(e); } };
+exports.uploadSimulationThumbnail    = async (req, res, next) => { try { ApiResponse.ok(res, 'Thumbnail uploaded', await svc.uploadSimulationThumbnail(req.params.id, req.params.simId, req.file, req.user)); } catch (e) { next(e); } };
+exports.uploadClickRegions           = async (req, res, next) => { try { ApiResponse.ok(res, 'Click regions uploaded', await svc.uploadClickRegions(req.params.id, req.params.simId, req.file, req.body.regions, req.user)); } catch (e) { next(e); } };
 
 // ── Simulation completion steps ───────────────────────────────────────────────
 exports.getSimulationSteps  = async (req, res, next) => { try { ApiResponse.ok(res, 'Simulation steps', await svc.getSimulationSteps(req.params.id, req.params.simId, req.user)); } catch (e) { next(e); } };
@@ -52,17 +52,5 @@ exports.uploadWebGLSimulation = async (req, res, next) => {
       'WebGL simulation uploaded and ready',
       await svc.createWebGLSimulationInCatalog(req.params.id, req.body, req.file, req.user),
     );
-  } catch (e) { next(e); }
-};
-
-// ── Storage scan / relink (recovery tool) ─────────────────────────────────────
-exports.scanStorage = async (req, res, next) => {
-  try { ApiResponse.ok(res, 'Storage scan', await svc.scanStorage(req.user)); } catch (e) { next(e); }
-};
-
-exports.relinkSimulations = async (req, res, next) => {
-  try {
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
-    ApiResponse.ok(res, 'Simulations relinked', await svc.relinkSimulations(req.body.mappings, req.user, baseUrl));
   } catch (e) { next(e); }
 };

@@ -157,6 +157,51 @@ const RoleModel = {
     return rows;
   },
 
+  /** User counts per role within an institution — dashboard KPI cards. */
+  async countUsersByRole(institutionId) {
+    const { rows } = await pool.query(
+      `SELECT r.name, COUNT(DISTINCT ur.user_id) AS total
+         FROM user_roles ur
+         JOIN roles r ON r.id = ur.role_id
+         JOIN users u ON u.id = ur.user_id AND u.deleted_at IS NULL
+        WHERE u.institution_id = $1 AND r.label NOT LIKE '[DEPRECATED]%'
+        GROUP BY r.name`,
+      [institutionId],
+    );
+    const byRole = {};
+    rows.forEach((r) => { byRole[r.name] = parseInt(r.total, 10); });
+    return byRole;
+  },
+
+  /**
+   * User counts per role among users enrolled/assigned to courses in the given
+   * departments — dept_manager dashboard KPI. Mirrors the department-visibility
+   * join already used in users.service.js's dept_manager list() branch.
+   */
+  async countUsersByDepartments(departmentIds) {
+    if (!departmentIds?.length) return {};
+    const { rows } = await pool.query(
+      `SELECT r.name, COUNT(DISTINCT ur.user_id) AS total
+         FROM user_roles ur
+         JOIN roles r ON r.id = ur.role_id
+         JOIN users u ON u.id = ur.user_id AND u.deleted_at IS NULL
+        WHERE r.label NOT LIKE '[DEPRECATED]%'
+          AND u.id IN (
+            SELECT DISTINCT e.user_id FROM enrollments e
+              JOIN courses c ON c.id = e.course_id
+             WHERE c.department_id = ANY($1) AND c.deleted_at IS NULL AND e.status != 'dropped'
+            UNION
+            SELECT DISTINCT c.instructor_id FROM courses c
+             WHERE c.department_id = ANY($1) AND c.deleted_at IS NULL AND c.instructor_id IS NOT NULL
+          )
+        GROUP BY r.name`,
+      [departmentIds],
+    );
+    const byRole = {};
+    rows.forEach((r) => { byRole[r.name] = parseInt(r.total, 10); });
+    return byRole;
+  },
+
   /** Returns the department IDs assigned to a dept_manager. */
   async getUserDepartments(userId) {
     const { rows } = await pool.query(

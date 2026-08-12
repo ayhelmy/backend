@@ -20,6 +20,7 @@ const { CourseModel, ModuleModel, SimulationModel, AuditModel,
         SimulationStepModel }            = require('../../db/models');
 const { parsePagination, buildPaginationMeta } = require('../../utils/pagination');
 const ApiError                          = require('../../utils/apiError');
+const eventDispatcher                    = require('../notifications/event-dispatcher.service');
 
 // ── Duration formatting ───────────────────────────────────────────────────────
 
@@ -258,6 +259,19 @@ exports.end = async (sessionId, { exitReason } = {}, actor, req) => {
     },
     ipAddress: req?.ip ?? null,
   }).catch(() => {});
+
+  if (ended && result.status === 'ended') {
+    Promise.all([SimulationModel.findById(session.simulation_id), CourseModel.findById(session.course_id)])
+      .then(([sim, course]) => eventDispatcher.emit('simulation.completed', {
+        recipientIds: [session.user_id],
+        institutionId: session.institution_id,
+        departmentId: session.department_id ?? null,
+        courseId: session.course_id,
+        lessonId: session.lesson_id,
+        data: { simulationTitle: sim?.title ?? 'Simulation', courseTitle: course?.title ?? '', courseId: session.course_id },
+      }))
+      .catch(() => {});
+  }
 
   return buildEndResponse(result);
 };
@@ -595,6 +609,38 @@ exports.getClickEvents = async (sessionId, actor) => {
       y:          c.y,
     }));
   return { events, totalClicks: events.length };
+};
+
+// ── getStepBreakdown ──────────────────────────────────────────────────────────
+// Per-step pass/fail for a session, for the student/instructor "which steps did
+// I get right" review view. Mirrors evaluateSteps()'s in-order category-matching
+// algorithm (see above), but records the outcome of every defined step instead
+// of collapsing to a single pass/fail — that collapsed value is all that's
+// persisted on the session (steps_status), so this is recomputed on read rather
+// than stored.
+
+exports.getStepBreakdown = async (sessionId, actor) => {
+  const { session, clicks } = await loadCategorizedClicks(sessionId, actor);
+
+  const steps = await SimulationStepModel.findBySimulationId(session.simulation_id);
+  if (!steps.length) return { steps: [], overallStatus: null };
+
+  const results = steps.map(s => ({
+    order: s.step_order, label: s.label, achieved: false, achievedAt: null,
+  }));
+
+  let stepIdx = 0;
+  for (const click of clicks) {
+    if (stepIdx >= steps.length) break;
+    if (click.category.toLowerCase() === steps[stepIdx].category_name.toLowerCase()) {
+      results[stepIdx].achieved   = true;
+      results[stepIdx].achievedAt = click.clickedAt;
+      stepIdx++;
+    }
+  }
+
+  const overallStatus = session.steps_status ?? (stepIdx === steps.length ? 'passed' : 'failed');
+  return { steps: results, overallStatus };
 };
 
 // ── getSimulationAnalytics ────────────────────────────────────────────────────

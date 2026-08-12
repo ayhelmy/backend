@@ -12,8 +12,11 @@ const config = require('../config');
 /**
  * Issue a short-lived access token.
  * @param {{ id: string, email: string, institutionId: string|null, roles: string[] }} user
+ * @param {string} [expiresInOverride]  Overrides config.jwt.accessExpiresIn — used by
+ *   the LTI session-exchange flow, which mints a longer-lived token (no refresh
+ *   cookie is issued for LTI sessions, see utils/lti-launch-token.js).
  */
-function signAccess(user) {
+function signAccess(user, expiresInOverride) {
   return jwt.sign(
     {
       sub:           user.id,
@@ -22,7 +25,7 @@ function signAccess(user) {
       roles:         user.roles,        // array of role name strings
     },
     config.jwt.accessSecret,
-    { expiresIn: config.jwt.accessExpiresIn },
+    { expiresIn: expiresInOverride || config.jwt.accessExpiresIn },
   );
 }
 

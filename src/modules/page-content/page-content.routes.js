@@ -5,7 +5,8 @@
  *
  * Public (no auth):
  *   GET  /api/v1/page-content/stats          — live platform statistics
- *   GET  /api/v1/page-content/:page          — active content for a page (why_bedo|about|resources)
+ *   GET  /api/v1/page-content/home-page      — aggregated public home page payload
+ *   GET  /api/v1/page-content/:page          — active content for a page (why_bedo|about|resources|home)
  *
  * Admin (super_admin only):
  *   GET    /api/v1/page-content/:page/admin  — all items incl. inactive
@@ -23,7 +24,9 @@ const { authorize }   = require('../../middleware/authorize');
 const router = Router();
 
 // ── Public ────────────────────────────────────────────────────────────────────
+// '/home-page' and '/stats' must be registered before the '/:page' catch-all.
 router.get('/stats',          ctrl.getPlatformStats);
+router.get('/home-page',      ctrl.getHomePage);
 router.get('/:page',          ctrl.getPageContent);
 
 // ── Admin — all routes below require auth + super_admin role ──────────────────

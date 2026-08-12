@@ -32,6 +32,15 @@ const AcademicYearModel = {
     return rows;
   },
 
+  /** Institution-wide count (across all departments) — institution_admin dashboard KPI. */
+  async countByInstitution(institutionId) {
+    const { rows } = await pool.query(
+      `SELECT COUNT(*) AS total FROM academic_years WHERE institution_id = $1 AND deleted_at IS NULL`,
+      [institutionId],
+    );
+    return parseInt(rows[0].total, 10);
+  },
+
   async create({ institutionId, departmentId, name, code, yearOrder, status, startDate, endDate, createdBy }) {
     const { rows } = await pool.query(
       `INSERT INTO academic_years

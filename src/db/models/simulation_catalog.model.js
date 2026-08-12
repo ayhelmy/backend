@@ -427,7 +427,8 @@ const SimulationCatalogModel = {
     const { rows } = await pool.query(
       `SELECT sci.id, sci.catalog_id, sci.simulation_id, sci.sort_order, sci.created_at,
               s.title, s.description, s.type, s.visibility, s.status AS sim_status,
-              s.thumbnail_url, s.estimated_minutes, s.difficulty
+              s.thumbnail_url, s.estimated_minutes, s.difficulty,
+              s.is_featured, s.featured_order
          FROM simulation_catalog_items sci
          JOIN simulations s ON s.id = sci.simulation_id
         WHERE sci.catalog_id = $1 AND s.deleted_at IS NULL

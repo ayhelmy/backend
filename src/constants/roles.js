@@ -23,4 +23,17 @@ const ASSIGNABLE_ROLES = [
 // Roles only super_admin can assign
 const SUPER_ONLY_ROLES = [ROLES.SUPER_ADMIN];
 
-module.exports = { ROLES, ADMIN_ROLES, STAFF_ROLES, INSTRUCTOR_ROLES, ASSIGNABLE_ROLES, SUPER_ONLY_ROLES };
+// Numeric rank — lower number means higher privilege in the hierarchy.
+// Used to pick a user's "highest active role" (e.g. dashboard routing) and to
+// filter role-list visibility so users can never see peers above them.
+const ROLE_RANK = {
+  [ROLES.SUPER_ADMIN]:        0,
+  [ROLES.INSTITUTION_ADMIN]:  1,
+  [ROLES.DEPT_MANAGER]:       2,
+  [ROLES.INSTRUCTOR]:         3,
+  [ROLES.TEACHING_ASSISTANT]: 4,
+  [ROLES.STUDENT]:            5,
+  [ROLES.GUEST]:              6,
+};
+
+module.exports = { ROLES, ADMIN_ROLES, STAFF_ROLES, INSTRUCTOR_ROLES, ASSIGNABLE_ROLES, SUPER_ONLY_ROLES, ROLE_RANK };

@@ -17,6 +17,13 @@ exports.getPlatformStats = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
+exports.getHomePage = async (req, res, next) => {
+  try {
+    const data = await svc.getHomePagePayload();
+    ApiResponse.ok(res, 'Home page content', data);
+  } catch (e) { next(e); }
+};
+
 exports.getAllForAdmin = async (req, res, next) => {
   try {
     const data = await svc.getAllForAdmin(req.params.page);

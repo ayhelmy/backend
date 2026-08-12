@@ -8,6 +8,7 @@
 
 const { pool } = require('../../config/database');
 const ApiError  = require('../../utils/apiError');
+const simulationsService = require('../simulations/simulations.service');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -79,6 +80,72 @@ exports.getPlatformStats = async () => {
     institutionsCount: counts.institutions_count,
     disciplinesCount:  counts.disciplines_count,
     uptime,
+  };
+};
+
+/**
+ * Return the full public home page payload in a single call:
+ * hero, statistics, features, featured simulations, demo, benefits, lms, CTA.
+ * Section-header singleton rows (e.g. 'features_intro') are nested under
+ * `intro`, alongside their card list, rather than flattened into the cards.
+ */
+exports.getHomePagePayload = async () => {
+  const { rows } = await pool.query(
+    `SELECT * FROM page_content
+      WHERE page = 'home' AND is_active = TRUE
+      ORDER BY section, sort_order`,
+  );
+
+  const grouped = {};
+  for (const row of rows) {
+    const s = row.section;
+    if (!grouped[s]) grouped[s] = [];
+    grouped[s].push(rowToItem(row));
+  }
+
+  const { rows: [counts] } = await pool.query(`
+    SELECT
+      (SELECT COUNT(*)::int FROM simulations        WHERE deleted_at IS NULL)                        AS simulations_count,
+      (SELECT COUNT(*)::int FROM simulation_catalogs WHERE parent_id IS NULL AND deleted_at IS NULL)  AS disciplines_count
+  `);
+
+  const statistics = (grouped.stats ?? []).map((item) => {
+    const metric = item.extra?.metric;
+    let value;
+    if (metric === 'simulations_count')      value = `${counts.simulations_count}${item.extra?.suffix ?? ''}`;
+    else if (metric === 'disciplines_count') value = `${counts.disciplines_count}${item.extra?.suffix ?? ''}`;
+    else                                      value = item.extra?.value ?? '';
+    return {
+      label:             item.title,
+      value,
+      shortDescription:  item.description,
+      icon:              item.iconName,
+    };
+  });
+
+  const featuredSimulations = await simulationsService.listFeaturedPublic();
+
+  return {
+    hero:     grouped.hero?.[0] ?? null,
+    statistics,
+    features: {
+      intro: grouped.features_intro?.[0] ?? null,
+      cards: grouped.features ?? [],
+    },
+    featuredSimulations: {
+      intro: grouped.featured_simulations_intro?.[0] ?? null,
+      items: featuredSimulations,
+    },
+    demo: grouped.demo?.[0] ?? null,
+    benefits: {
+      intro: grouped.benefits_intro?.[0] ?? null,
+      cards: grouped.benefits ?? [],
+    },
+    lms: {
+      intro: grouped.lms_intro?.[0] ?? null,
+      cards: grouped.lms ?? [],
+    },
+    callToAction: grouped.cta?.[0] ?? null,
   };
 };
 

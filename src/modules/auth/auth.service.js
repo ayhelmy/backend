@@ -40,49 +40,34 @@ const MAX_LOGIN_FAILS     = 5;
 const FAIL_WINDOW_SECONDS = 15 * 60;              // 15 minutes lock window
 
 // ── Cookie helpers ────────────────────────────────────────────────────────────
-//function setRefreshCookie(res, token) {
-  //res.cookie('refreshToken', token, {
-    //httpOnly: true,
-    //secure:   config.env === 'production',
-    //sameSite: config.env === 'production' ? 'strict' : 'lax',
-    //path:     '/',
-    //maxAge:   REFRESH_TTL_SECONDS * 1000,
-  //});
-//}
-
-function setRefreshCookie(res, token) {
-  const cookieOptions = {
+function setRefreshCookie(req, res, token) {
+  const isHttps = req.secure;
+  res.cookie('refreshToken', token, {
     httpOnly: true,
-    secure: config.env === 'production',
-    sameSite: config.env === 'production' ? 'none' : 'lax',
-    path: '/',
-    maxAge: REFRESH_TTL_SECONDS * 1000,
-  };
-
-  res.cookie('refreshToken', token, cookieOptions);
-}
-
-function clearRefreshCookie(res) {
-  res.clearCookie('refreshToken', {
-    httpOnly: true,
-    secure: config.env === 'production',
-    sameSite: config.env === 'production' ? 'none' : 'lax',
-    path: '/',
+    secure:   isHttps,
+    // SameSite=None is required for cookies to survive a cross-site fetch —
+    // browsers treat scheme+port as part of "site", so a local HTTPS backend
+    // paired with an HTTP frontend (or any cross-origin deployment) needs it.
+    // Production keeps Strict when not otherwise cross-site — real deployments
+    // should put frontend+backend under the same registrable domain so this
+    // stronger CSRF protection still applies.
+    sameSite: config.env === 'production' ? 'strict' : (isHttps ? 'none' : 'lax'),
+    path:     '/',
+    maxAge:   REFRESH_TTL_SECONDS * 1000,
   });
 }
 
-function parseRefreshToken(req) {
-  if (req.cookies?.refreshToken) return req.cookies.refreshToken;
-  if (req.body?.refreshToken) return req.body.refreshToken;
-  const authHeader = req.headers?.authorization;
-  if (typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')) {
-    return authHeader.slice(7).trim();
-  }
-  return null;
+function clearRefreshCookie(req, res) {
+  res.clearCookie('refreshToken', {
+    httpOnly: true,
+    path:     '/',
+    secure:   req.secure,
+    sameSite: config.env === 'production' ? 'strict' : (req.secure ? 'none' : 'lax'),
+  });
 }
 
 // ── Shared: build auth response payload ──────────────────────────────────────
-async function buildAuthPayload(userId) {
+async function buildAuthPayload(userId, accessTokenTtl) {
   const user  = await UserModel.findById(userId);
   if (!user) throw ApiError.unauthorized('User not found');
   const roles = await RoleModel.getUserRolesWithPermissions(user.id, user.institution_id);
@@ -92,7 +77,7 @@ async function buildAuthPayload(userId) {
     email:         user.email,
     institutionId: user.institution_id,
     roles:         roleNames,
-  });
+  }, accessTokenTtl);
   return {
     accessToken,
     user: {
@@ -111,59 +96,41 @@ async function buildAuthPayload(userId) {
   };
 }
 
-// ── Redis helpers with error handling ──────────────────────────────────────
-async function safeRedisCall(fn, fallback = null, ...args) {
-  try {
-    return await fn(...args);
-  } catch (err) {
-    console.warn(`Redis operation failed: ${err.message}`);
-    return fallback;
-  }
-}
-
 // ── Store a new refresh token ─────────────────────────────────────────────────
 async function storeRefreshToken(userId, institutionId, token) {
-  try {
-    await redis.setex(
-      keys.refresh(token),
-      REFRESH_TTL_SECONDS,
-      JSON.stringify({ userId, institutionId }),
-    );
-    await redis.sadd(keys.sessions(userId), token);
-    await redis.expire(keys.sessions(userId), REFRESH_TTL_SECONDS + 60);
-  } catch (err) {
-    console.warn(`Failed to store refresh token for user ${userId}: ${err.message}`);
-    // Do not rethrow – we want login/refresh to succeed even if Redis is down.
-    // However, if refresh token isn't stored, subsequent refresh will fail.
-  }
+  await redis.setex(
+    keys.refresh(token),
+    REFRESH_TTL_SECONDS,
+    JSON.stringify({ userId, institutionId }),
+  );
+  await redis.sadd(keys.sessions(userId), token);
+  // keep session set TTL in sync
+  await redis.expire(keys.sessions(userId), REFRESH_TTL_SECONDS + 60);
 }
 
 // ── Revoke a specific refresh token ──────────────────────────────────────────
 async function revokeRefreshToken(userId, token) {
-  try {
-    await redis.del(keys.refresh(token));
-    await redis.srem(keys.sessions(userId), token);
-  } catch (err) {
-    console.warn(`Failed to revoke refresh token for user ${userId}: ${err.message}`);
-  }
+  await redis.del(keys.refresh(token));
+  await redis.srem(keys.sessions(userId), token);
 }
 
-// ── Revoke all sessions for a user ───────────────────────────────────────────
+// ── Revoke all sessions for a user (password reset, account suspension) ───────
 async function revokeAllSessions(userId) {
-  try {
-    const tokens = await redis.smembers(keys.sessions(userId));
-    if (tokens.length) {
-      await redis.del(...tokens.map(keys.refresh));
-      await redis.del(keys.sessions(userId));
-    }
-    await redis.del(`user_perms:${userId}:*`);
-  } catch (err) {
-    console.warn(`Failed to revoke all sessions for user ${userId}: ${err.message}`);
+  const tokens = await redis.smembers(keys.sessions(userId));
+  if (tokens.length) {
+    await redis.del(...tokens.map(keys.refresh));
+    await redis.del(keys.sessions(userId));
   }
+  // Invalidate cached permissions
+  await redis.del(`user_perms:${userId}:*`);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
 // AUTH-01  Register
+// SRS §4.1 AUTH-01, §4.4 INST-04:
+//   Email domain is looked up against institution_domains + institutions.domain.
+//   Unrecognised domains are rejected — the platform is institution-only.
+//   Recognised domains get institution_id set and 'student' role auto-assigned.
 // ═════════════════════════════════════════════════════════════════════════════
 exports.register = async ({ email, password, firstName, lastName }) => {
   const normEmail = email.toLowerCase().trim();
@@ -171,6 +138,7 @@ exports.register = async ({ email, password, firstName, lastName }) => {
   const existing = await UserModel.findByEmailWithHash(normEmail);
   if (existing) throw ApiError.conflict('An account with this email already exists.');
 
+  // ── Resolve institution from email domain (INST-04) ───────────────────────
   const emailDomain = normEmail.split('@')[1];
   const institution = emailDomain
     ? await InstitutionModel.findByEmailDomain(emailDomain)
@@ -183,6 +151,7 @@ exports.register = async ({ email, password, firstName, lastName }) => {
     );
   }
 
+  // Subscription user-cap check (SRS §4.4 INST-01)
   const activeCount = await UserModel.countByInstitution(institution.id);
   if (activeCount >= institution.max_users) {
     throw ApiError.badRequest(
@@ -198,15 +167,11 @@ exports.register = async ({ email, password, firstName, lastName }) => {
     status: 'pending',
   });
 
+  // Auto-assign 'student' role for all self-registered users (SRS AUTH-01)
   await RoleModel.assignRole(user.id, 'student', institution.id, null);
 
   const token = randomToken();
-  try {
-    await redis.setex(keys.emailVerify(token), EMAIL_VERIFY_TTL, user.id);
-  } catch (err) {
-    console.warn(`Failed to store email verification token for ${normEmail}: ${err.message}`);
-    // We'll continue; user can request resend.
-  }
+  await redis.setex(keys.emailVerify(token), EMAIL_VERIFY_TTL, user.id);
   await sendVerificationEmail(normEmail, token);
 
   await AuditModel.log({
@@ -225,22 +190,12 @@ exports.register = async ({ email, password, firstName, lastName }) => {
 // ═════════════════════════════════════════════════════════════════════════════
 // AUTH-01  Verify Email
 // ═════════════════════════════════════════════════════════════════════════════
-exports.verifyEmail = async (token, res) => {
-  let userId = null;
-  try {
-    userId = await redis.get(keys.emailVerify(token));
-  } catch (err) {
-    console.warn(`Failed to retrieve verification token: ${err.message}`);
-    throw ApiError.badRequest('Unable to verify email at this time. Please try again later.');
-  }
+exports.verifyEmail = async (token, req, res) => {
+  const userId = await redis.get(keys.emailVerify(token));
   if (!userId) throw ApiError.badRequest('Invalid or expired verification link. Please request a new one.');
 
   await UserModel.update(userId, { status: 'active' });
-  try {
-    await redis.del(keys.emailVerify(token));
-  } catch (err) {
-    console.warn(`Failed to delete verification token: ${err.message}`);
-  }
+  await redis.del(keys.emailVerify(token));
 
   await AuditModel.log({
     actorId:    userId,
@@ -249,11 +204,12 @@ exports.verifyEmail = async (token, res) => {
     entityId:   userId,
   });
 
+  // Auto-login on verification (issue tokens so user lands on dashboard)
   const payload = await buildAuthPayload(userId);
   const refreshToken = randomToken();
   await storeRefreshToken(userId, payload.user.institutionId, refreshToken);
   await UserModel.touchLogin(userId);
-  setRefreshCookie(res, refreshToken);
+  setRefreshCookie(req, res, refreshToken);
 
   return payload;
 };
@@ -264,12 +220,14 @@ exports.verifyEmail = async (token, res) => {
 exports.login = async ({ email, password }, req, res) => {
   const user = await UserModel.findByEmailWithHash(email);
 
+  // Unified 401 for non-existent accounts (timing safe: bcrypt compare below)
   const dummyHash = '$2a$12$invalidhashplaceholderXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
   if (!user) {
-    await comparePassword(password, dummyHash);
+    await comparePassword(password, dummyHash); // constant-time dummy compare
     throw ApiError.unauthorized('Invalid email or password.');
   }
 
+  // Status gates (AUTH-08)
   if (user.status === 'pending') {
     throw ApiError.forbidden(
       'Please verify your email address before signing in. Check your inbox for the verification link.',
@@ -281,53 +239,35 @@ exports.login = async ({ email, password }, req, res) => {
     );
   }
 
-  // Failed-login lockout – wrap in try-catch
-  let fails = 0;
-  try {
-    const failKey = keys.loginFails(email);
-    fails = parseInt(await redis.get(failKey) || '0', 10);
-    if (fails >= MAX_LOGIN_FAILS) {
-      const ttl = await redis.ttl(failKey);
-      throw ApiError.badRequest(
-        `Too many failed login attempts. Please try again in ${Math.ceil(ttl / 60)} minutes.`,
-      );
-    }
-  } catch (err) {
-    if (err instanceof ApiError) throw err;
-    console.warn(`Failed to check login fails for ${email}: ${err.message}`);
-    // Continue without lockout (allow login)
+  // Failed-login lockout (AUTH-08)
+  const failKey = keys.loginFails(email);
+  const fails   = parseInt(await redis.get(failKey) || '0', 10);
+  if (fails >= MAX_LOGIN_FAILS) {
+    const ttl = await redis.ttl(failKey);
+    throw ApiError.badRequest(
+      `Too many failed login attempts. Please try again in ${Math.ceil(ttl / 60)} minutes.`,
+    );
   }
 
   const valid = await comparePassword(password, user.password_hash);
   if (!valid) {
-    try {
-      const failKey = keys.loginFails(email);
-      const newCount = await redis.incr(failKey);
-      if (newCount === 1) await redis.expire(failKey, FAIL_WINDOW_SECONDS);
-      const remaining = MAX_LOGIN_FAILS - newCount;
-      const msg = remaining > 0
-        ? `Invalid email or password. ${remaining} attempt${remaining !== 1 ? 's' : ''} remaining.`
-        : 'Too many failed attempts. Account temporarily locked for 15 minutes.';
-      throw ApiError.unauthorized(msg);
-    } catch (err) {
-      if (err instanceof ApiError) throw err;
-      console.warn(`Failed to increment login fails for ${email}: ${err.message}`);
-      throw ApiError.unauthorized('Invalid email or password.');
-    }
+    const newCount = await redis.incr(failKey);
+    if (newCount === 1) await redis.expire(failKey, FAIL_WINDOW_SECONDS);
+    const remaining = MAX_LOGIN_FAILS - newCount;
+    const msg = remaining > 0
+      ? `Invalid email or password. ${remaining} attempt${remaining !== 1 ? 's' : ''} remaining.`
+      : 'Too many failed attempts. Account temporarily locked for 15 minutes.';
+    throw ApiError.unauthorized(msg);
   }
 
-  // Clear fail counter – try-catch
-  try {
-    await redis.del(keys.loginFails(email));
-  } catch (err) {
-    console.warn(`Failed to clear login fails for ${email}: ${err.message}`);
-  }
+  // Success — clear fail counter
+  await redis.del(failKey);
 
   const payload      = await buildAuthPayload(user.id);
   const refreshToken = randomToken();
   await storeRefreshToken(user.id, payload.user.institutionId, refreshToken);
   await UserModel.touchLogin(user.id);
-  setRefreshCookie(res, refreshToken);
+  setRefreshCookie(req, res, refreshToken);
 
   await AuditModel.log({
     institutionId: payload.user.institutionId,
@@ -349,7 +289,7 @@ exports.login = async ({ email, password }, req, res) => {
 exports.logout = async (user, req, res) => {
   const token = req.cookies?.refreshToken;
   if (token) await revokeRefreshToken(user.id, token);
-  clearRefreshCookie(res);
+  clearRefreshCookie(req, res);
 
   await AuditModel.log({
     institutionId: user.institutionId,
@@ -366,26 +306,21 @@ exports.logout = async (user, req, res) => {
 // AUTH-05  Refresh Token
 // ═════════════════════════════════════════════════════════════════════════════
 exports.refresh = async (req, res) => {
-  const token = parseRefreshToken(req);
-  if (!token) throw ApiError.unauthorized('No refresh token provided. Please sign in again.');
+  const token = req.cookies?.refreshToken;
+  if (!token) throw ApiError.unauthorized('No refresh token. Please sign in again.');
 
-  let stored = null;
-  try {
-    stored = await redis.get(keys.refresh(token));
-  } catch (err) {
-    console.warn(`Failed to retrieve refresh token: ${err.message}`);
-    throw ApiError.unauthorized('Unable to verify session. Please sign in again.');
-  }
+  const stored = await redis.get(keys.refresh(token));
   if (!stored) throw ApiError.unauthorized('Session expired. Please sign in again.');
 
   const { userId, institutionId } = JSON.parse(stored);
 
+  // Token rotation — invalidate old token immediately
   await revokeRefreshToken(userId, token);
 
   const payload      = await buildAuthPayload(userId);
   const newRefresh   = randomToken();
   await storeRefreshToken(userId, institutionId, newRefresh);
-  setRefreshCookie(res, newRefresh);
+  setRefreshCookie(req, res, newRefresh);
 
   return payload;
 };
@@ -394,6 +329,7 @@ exports.refresh = async (req, res) => {
 // AUTH-05  Forgot Password
 // ═════════════════════════════════════════════════════════════════════════════
 exports.forgotPassword = async (email, req) => {
+  // Always return success — never reveal whether email exists (security)
   const user = await UserModel.findByEmailWithHash(email);
   console.log('Searching for user with email:', email);
   if (!user) {
@@ -403,12 +339,7 @@ exports.forgotPassword = async (email, req) => {
   console.log('User found with email:', email);
 
   const token = randomToken();
-  try {
-    await redis.setex(keys.pwdReset(token), PWD_RESET_TTL, user.id);
-  } catch (err) {
-    console.warn(`Failed to store password reset token for ${email}: ${err.message}`);
-    return; // If Redis fails, we cannot proceed; but we still don't reveal to client.
-  }
+  await redis.setex(keys.pwdReset(token), PWD_RESET_TTL, user.id);
   console.log('Generated password reset token for user:', user.id);
   await sendPasswordResetEmail(email, token);
 
@@ -427,28 +358,19 @@ exports.forgotPassword = async (email, req) => {
 // AUTH-05  Reset Password
 // ═════════════════════════════════════════════════════════════════════════════
 exports.resetPassword = async ({ token, password }, req) => {
-  let userId = null;
-  try {
-    userId = await redis.get(keys.pwdReset(token));
-  } catch (err) {
-    console.warn(`Failed to retrieve password reset token: ${err.message}`);
-    throw ApiError.badRequest('Unable to verify reset token. Please try again.');
-  }
+  const userId = await redis.get(keys.pwdReset(token));
   if (!userId) throw ApiError.badRequest('Invalid or expired password reset link. Please request a new one.');
 
   const passwordHash = await hashPassword(password);
-  await UserModel.update(userId, { status: 'active' });
+  await UserModel.update(userId, { status: 'active' }); // re-activate if suspended
   await require('../../config/database').query(
     'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
     [passwordHash, userId],
   );
 
+  // Invalidate all active sessions (force re-login on all devices)
   await revokeAllSessions(userId);
-  try {
-    await redis.del(keys.pwdReset(token));
-  } catch (err) {
-    console.warn(`Failed to delete password reset token: ${err.message}`);
-  }
+  await redis.del(keys.pwdReset(token));
 
   await AuditModel.log({
     actorId:    userId,
@@ -484,20 +406,30 @@ exports.getMe = async (userId) => {
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
-// AUTH-01  Resend verification email
+// AUTH-01  Resend verification email (bonus: needed for expired links)
 // ═════════════════════════════════════════════════════════════════════════════
 exports.resendVerification = async (email) => {
   const user = await UserModel.findByEmailWithHash(email);
-  if (!user || user.status !== 'pending') return;
+  if (!user || user.status !== 'pending') return; // silent
   const token = randomToken();
-  try {
-    await redis.setex(keys.emailVerify(token), EMAIL_VERIFY_TTL, user.id);
-  } catch (err) {
-    console.warn(`Failed to store verification token for ${email}: ${err.message}`);
-    return;
-  }
+  await redis.setex(keys.emailVerify(token), EMAIL_VERIFY_TTL, user.id);
   await sendVerificationEmail(email, token);
 };
 
-// Export the keys helper
+// ═════════════════════════════════════════════════════════════════════════════
+// LTI session issuance — mints a real SimuLearn access token for a user who
+// was provisioned/resolved via a validated LTI launch (see
+// modules/lti/session-exchange.service.js). Deliberately issues NO refresh
+// cookie: an LTI-launched session lives inside a (possibly third-party-iframe)
+// LMS context where a cross-site refresh cookie is fragile (SameSite/Secure),
+// and a bounded-lifetime access token is itself "bound to the launch" per the
+// LTI security guidance — expiry just means "relaunch from the LMS".
+// ═════════════════════════════════════════════════════════════════════════════
+exports.issueLtiSession = async (userId) => {
+  const payload = await buildAuthPayload(userId, config.lti.sessionTokenTtl);
+  await UserModel.touchLogin(userId);
+  return payload;
+};
+
+// Export the keys helper for use in permission cache invalidation
 exports._keys = keys;

@@ -110,7 +110,7 @@ const otherInstructorActor = {
   permissions:   ['lessons.view'],
 };
 
-const mockReq = { protocol: 'http', get: () => 'localhost:5000', ip: '127.0.0.1' };
+const mockReq = { protocol: 'https', get: () => 'localhost:5000', ip: '127.0.0.1' };
 
 // ── Mock implementations ──────────────────────────────────────────────────────
 

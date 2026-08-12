@@ -232,6 +232,83 @@ exports.listDepartments = async (instId) => {
   return rows.map(mapDept);
 };
 
+exports.getDepartmentById = async (deptId) => {
+  const { rows } = await pool.query(
+    `SELECT id, institution_id, name, code, parent_id, created_at, updated_at
+       FROM departments WHERE id = $1 AND deleted_at IS NULL`,
+    [deptId],
+  );
+  return rows[0] ? mapDept(rows[0]) : null;
+};
+
+exports.getDepartmentsByIds = async (deptIds) => {
+  if (!deptIds?.length) return [];
+  const { rows } = await pool.query(
+    `SELECT id, institution_id, name, code, parent_id, created_at, updated_at
+       FROM departments WHERE id = ANY($1) AND deleted_at IS NULL
+      ORDER BY name`,
+    [deptIds],
+  );
+  return rows.map(mapDept);
+};
+
+// Departments in an institution that have no dept_manager assigned via user_departments.
+exports.listDepartmentsWithoutManager = async (instId) => {
+  const { rows } = await pool.query(
+    `SELECT d.id, d.name, d.code
+       FROM departments d
+       WHERE d.institution_id = $1 AND d.deleted_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM user_departments ud
+           JOIN user_roles ur ON ur.user_id = ud.user_id
+           JOIN roles r ON r.id = ur.role_id AND r.name = 'dept_manager'
+           WHERE ud.department_id = d.id
+         )
+      ORDER BY d.name`,
+    [instId],
+  );
+  return rows;
+};
+
+// Platform-wide institution counts by status — super_admin dashboard KPIs.
+exports.countByStatus = async () => {
+  const { rows } = await pool.query(
+    `SELECT status, COUNT(*) AS total FROM institutions WHERE deleted_at IS NULL GROUP BY status`,
+  );
+  const byStatus = { active: 0, suspended: 0 };
+  rows.forEach((r) => { byStatus[r.status] = parseInt(r.total, 10); });
+  byStatus.total = Object.values(byStatus).reduce((a, b) => a + b, 0);
+  return byStatus;
+};
+
+// Institution-level rollup for the platform (super_admin) dashboard: per-institution
+// users/departments/courses counts + last activity timestamp from the audit log.
+exports.listOverview = async () => {
+  const { rows } = await pool.query(
+    `SELECT
+         i.id, i.name, i.status,
+         (SELECT COUNT(*) FROM users u WHERE u.institution_id = i.id AND u.deleted_at IS NULL) AS users_count,
+         (SELECT COUNT(*) FROM departments d WHERE d.institution_id = i.id AND d.deleted_at IS NULL) AS departments_count,
+         (SELECT COUNT(*) FROM courses c WHERE c.institution_id = i.id AND c.deleted_at IS NULL) AS courses_count,
+         (SELECT COUNT(*) FROM users u WHERE u.institution_id = i.id AND u.deleted_at IS NULL
+            AND u.last_login_at >= NOW() - INTERVAL '30 days') AS active_users_month,
+         (SELECT MAX(occurred_at) FROM audit_logs al WHERE al.institution_id = i.id) AS last_activity
+       FROM institutions i
+       WHERE i.deleted_at IS NULL
+       ORDER BY i.name`,
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    status: r.status,
+    usersCount: parseInt(r.users_count, 10),
+    departmentsCount: parseInt(r.departments_count, 10),
+    coursesCount: parseInt(r.courses_count, 10),
+    activeUsersMonth: parseInt(r.active_users_month, 10),
+    lastActivity: r.last_activity,
+  }));
+};
+
 exports.createDepartment = async (instId, body, actor) => {
   const { name, code, parentId } = body;
 

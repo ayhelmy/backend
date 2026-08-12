@@ -265,6 +265,76 @@ const SimulationActivitySessionModel = {
     );
   },
 
+  /** Count of currently-active sessions, scoped — dashboard KPI. */
+  async countActive({ institutionId, departmentId, courseIds } = {}) {
+    const params = [];
+    const filters = [`status = 'active'`];
+    if (institutionId) filters.push(`institution_id = $${params.push(institutionId)}`);
+    if (departmentId)  filters.push(`department_id = $${params.push(departmentId)}`);
+    if (courseIds?.length) filters.push(`course_id = ANY($${params.push(courseIds)})`);
+    const { rows } = await pool.query(
+      `SELECT COUNT(*) AS total FROM simulation_activity_sessions WHERE ${filters.join(' AND ')}`,
+      params,
+    );
+    return parseInt(rows[0].total, 10);
+  },
+
+  /** Aggregate summary stats, scoped by institution/department/student — dashboard KPI. */
+  async getScopedSummary({ institutionId, departmentId, userId } = {}) {
+    const params = [];
+    const filters = ['1=1'];
+    if (institutionId) filters.push(`institution_id = $${params.push(institutionId)}`);
+    if (departmentId)  filters.push(`department_id = $${params.push(departmentId)}`);
+    if (userId)        filters.push(`user_id = $${params.push(userId)}`);
+    const { rows } = await pool.query(
+      `SELECT
+         COUNT(*)::INTEGER                                       AS total_launches,
+         COUNT(DISTINCT user_id)::INTEGER                        AS unique_students,
+         COUNT(DISTINCT simulation_id)::INTEGER                  AS distinct_simulations,
+         COALESCE(SUM(duration_seconds), 0)::INTEGER             AS total_duration_seconds,
+         COALESCE(ROUND(AVG(duration_seconds)::NUMERIC, 0), 0)::INTEGER
+                                                                 AS avg_duration_seconds
+         FROM simulation_activity_sessions WHERE ${filters.join(' AND ')}`,
+      params,
+    );
+    return rows[0] ?? { total_launches: 0, unique_students: 0, distinct_simulations: 0, total_duration_seconds: 0, avg_duration_seconds: 0 };
+  },
+
+  /** Active students in a course with zero simulation_activity_sessions rows — instructor follow-up. */
+  async countStudentsWithoutActivity(courseId) {
+    const { rows } = await pool.query(
+      `SELECT COUNT(*) AS total FROM enrollments e
+        WHERE e.course_id = $1 AND e.role = 'student' AND e.status = 'active'
+          AND NOT EXISTS (SELECT 1 FROM simulation_activity_sessions s WHERE s.course_id = $1 AND s.user_id = e.user_id)`,
+      [courseId],
+    );
+    return parseInt(rows[0].total, 10);
+  },
+
+  /** Most recent sessions, scoped — feeds the recent-activity merge. */
+  async listRecent({ institutionId, departmentId, courseId, courseIds, studentId, limit = 10 } = {}) {
+    const params = [];
+    const filters = ['1=1'];
+    if (institutionId) filters.push(`s.institution_id = $${params.push(institutionId)}`);
+    if (departmentId)  filters.push(`s.department_id = $${params.push(departmentId)}`);
+    if (courseId)      filters.push(`s.course_id = $${params.push(courseId)}`);
+    if (courseIds?.length) filters.push(`s.course_id = ANY($${params.push(courseIds)})`);
+    if (studentId)      filters.push(`s.user_id = $${params.push(studentId)}`);
+    params.push(limit);
+    const { rows } = await pool.query(
+      `SELECT s.id, s.user_id, s.course_id, s.simulation_id, s.status,
+              s.started_at, s.ended_at, s.duration_seconds,
+              u.first_name, u.last_name, sim.title AS simulation_title
+         FROM simulation_activity_sessions s
+         LEFT JOIN users u ON u.id = s.user_id
+         LEFT JOIN simulations sim ON sim.id = s.simulation_id
+        WHERE ${filters.join(' AND ')}
+        ORDER BY s.started_at DESC LIMIT $${params.length}`,
+      params,
+    );
+    return rows;
+  },
+
   /** Aggregate summary stats for the instructor course header card. */
   async getCourseSummary(courseId) {
     const { rows } = await pool.query(

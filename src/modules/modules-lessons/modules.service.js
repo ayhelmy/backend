@@ -9,8 +9,19 @@
  * Timed release (MOD-07): module visible only after unlock_at timestamp.
  */
 
-const { ModuleModel, CourseModel, AuditModel, SimulationCatalogModel, SimulationModel } = require('../../db/models');
+const {
+  ModuleModel, CourseModel, AuditModel, SimulationCatalogModel, SimulationModel, QuizModel,
+  QuizAttemptModel,
+} = require('../../db/models');
 const ApiError = require('../../utils/apiError');
+const eventDispatcher = require('../notifications/event-dispatcher.service');
+const recipientResolver = require('../notifications/recipient-resolver.service');
+
+// lesson_mode values that require each activity type (migration 050 adds the
+// 4 quiz combinations alongside the original 3 content/simulation modes).
+const CONTENT_MODES    = ['content', 'content_and_simulation', 'content_and_quiz', 'content_simulation_and_quiz'];
+const SIMULATION_MODES = ['simulation', 'content_and_simulation', 'simulation_and_quiz', 'content_simulation_and_quiz'];
+const QUIZ_MODES       = ['quiz', 'content_and_quiz', 'simulation_and_quiz', 'content_simulation_and_quiz'];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -71,6 +82,30 @@ async function assertSimulationAccess(simulationId, course, actor) {
       'Simulation is not available for this institution. ' +
       'Add it to an assigned catalog first.',
     );
+  }
+}
+
+/**
+ * Ensure a quiz is accessible to the actor for the given course: it must
+ * belong to the same course/institution and not be soft-deleted. The
+ * status==='published' gate for students is enforced when lessons are
+ * fetched for student view (matching the existing is_published gating),
+ * not here — this only validates the instructor's authoring-time attachment.
+ */
+async function assertQuizAccess(quizId, course, actor) {
+  const quiz = await QuizModel.findById(quizId);
+  if (!quiz) {
+    throw ApiError.badRequest(`Quiz "${quizId}" not found.`);
+  }
+  if (actor.roles?.includes('super_admin')) return;
+  if (quiz.course_id !== course.id) {
+    throw ApiError.badRequest('Quiz does not belong to this course.');
+  }
+
+  const isAdmin = actor.roles?.includes('institution_admin') ||
+    (actor.roles?.includes('dept_manager') && course.institution_id === actor.institutionId);
+  if (!isAdmin && quiz.created_by !== actor.id) {
+    throw ApiError.forbidden('You can only attach quizzes you created to a lesson.');
   }
 }
 
@@ -145,6 +180,7 @@ function mapLesson(row) {
     content:          row.content          ?? {},
     simulationId:     row.simulation_id    ?? null,
     catalogId:        row.catalog_id       ?? null,
+    quizId:           row.quiz_id          ?? null,
     position:         row.position,
     estimatedMinutes: row.estimated_minutes ?? null,
     isRequired:       row.is_required,
@@ -216,8 +252,10 @@ exports.getCourseTree = async (courseId, actor) => {
         lessonMode:       row.lesson_mode,
         contentType:      row.content_type   ?? null,
         type:             row.legacy_type,
+        content:          row.content        ?? {},
         simulationId:     row.simulation_id  ?? null,
         catalogId:        row.catalog_id     ?? null,
+        quizId:           row.quiz_id        ?? null,
         position:         row.lesson_position,
         estimatedMinutes: row.estimated_minutes ?? null,
         isRequired:       row.is_required,
@@ -335,6 +373,18 @@ exports.updateModule = async (moduleId, body, actor) => {
     });
   }
 
+  if (!before.isPublished && updated?.is_published) {
+    recipientResolver.courseStudents(course.id).then((recipientIds) => eventDispatcher.emit('module.published', {
+      recipientIds,
+      senderId: actor.id,
+      institutionId: course.institution_id,
+      departmentId: course.department_id ?? null,
+      courseId: course.id,
+      moduleId,
+      data: { moduleTitle: updated.title, courseTitle: course.title, courseId: course.id },
+    })).catch(() => {});
+  }
+
   return mapModule(updated);
 };
 
@@ -423,27 +473,37 @@ exports.createLesson = async (moduleId, body, actor) => {
   // Resolve content_type — accept new field or derive from legacy type
   const contentType = body.contentType ?? legacyTypeToContentType(body.type);
 
-  // Resolve simulation
+  // Resolve simulation / quiz
   const simulationId = body.simulationId ?? body.content?.simulation_id ?? null;
+  const quizId       = body.quizId ?? null;
 
   // Validate lesson_mode + required sub-fields
-  const hasContent    = lessonMode === 'content' || lessonMode === 'content_and_simulation';
-  const hasSimulation = lessonMode === 'simulation' || lessonMode === 'content_and_simulation';
+  const hasContent    = CONTENT_MODES.includes(lessonMode);
+  const hasSimulation = SIMULATION_MODES.includes(lessonMode);
+  const hasQuiz       = QUIZ_MODES.includes(lessonMode);
 
   if (hasContent && !contentType) {
     throw ApiError.badRequest(
-      'content_type is required when lesson_mode is "content" or "content_and_simulation".',
+      'content_type is required when lesson_mode includes content.',
     );
   }
   if (hasSimulation && !simulationId) {
     throw ApiError.badRequest(
-      'simulationId is required when lesson_mode is "simulation" or "content_and_simulation".',
+      'simulationId is required when lesson_mode includes a simulation.',
+    );
+  }
+  if (hasQuiz && !quizId) {
+    throw ApiError.badRequest(
+      'quizId is required when lesson_mode includes a quiz.',
     );
   }
 
-  // Validate simulation catalog access
+  // Validate simulation catalog access / quiz ownership
   if (simulationId) {
     await assertSimulationAccess(simulationId, course, actor);
+  }
+  if (quizId) {
+    await assertQuizAccess(quizId, course, actor);
   }
 
   const existing = await ModuleModel.listLessonsByModule(moduleId);
@@ -467,6 +527,7 @@ exports.createLesson = async (moduleId, body, actor) => {
     content,
     simulationId,
     catalogId:        body.catalogId       ?? null,
+    quizId,
     courseId:         course.id,
     institutionId:    course.institution_id,
     departmentId:     course.department_id ?? null,
@@ -481,6 +542,18 @@ exports.createLesson = async (moduleId, body, actor) => {
       institutionId: course.institution_id, actorId: actor.id, actorEmail: actor.email,
       action: 'lesson.simulation_assigned', entityType: 'Lesson', entityId: lesson.id,
       delta: { after: { simulationId, catalogId: body.catalogId ?? null } },
+    });
+  }
+
+  // Keep quizzes.lesson_id in sync with lessons.quiz_id (sync invariant —
+  // see migration 050). QuizModel.update is safe to call here since
+  // createLesson already validated quiz ownership via assertQuizAccess above.
+  if (quizId) {
+    await QuizModel.update(quizId, { lesson_id: lesson.id, module_id: moduleId });
+    await AuditModel.log({
+      institutionId: course.institution_id, actorId: actor.id, actorEmail: actor.email,
+      action: 'lesson.quiz_assigned', entityType: 'Lesson', entityId: lesson.id,
+      delta: { after: { quizId } },
     });
   }
 
@@ -503,13 +576,21 @@ exports.updateLesson = async (lessonId, body, actor) => {
   const course = await CourseModel.findById(mod.course_id);
   assertWrite(course, actor);
 
-  // Validate simulation access if simulation is being changed
+  // Validate simulation/quiz access if being changed
   if (body.simulationId) {
     await assertSimulationAccess(body.simulationId, course, actor);
     await AuditModel.log({
       institutionId: course.institution_id, actorId: actor.id, actorEmail: actor.email,
       action: 'lesson.simulation_assigned', entityType: 'Lesson', entityId: lessonId,
       delta: { after: { simulationId: body.simulationId, catalogId: body.catalogId ?? null } },
+    });
+  }
+  if (body.quizId !== undefined && body.quizId !== lesson.quiz_id) {
+    if (body.quizId) await assertQuizAccess(body.quizId, course, actor);
+    await AuditModel.log({
+      institutionId: course.institution_id, actorId: actor.id, actorEmail: actor.email,
+      action: 'lesson.quiz_assigned', entityType: 'Lesson', entityId: lessonId,
+      delta: { before: { quizId: lesson.quiz_id }, after: { quizId: body.quizId } },
     });
   }
 
@@ -523,7 +604,8 @@ exports.updateLesson = async (lessonId, body, actor) => {
   // Effective mode/contentType after update
   const newLessonMode  = body.lessonMode  ?? lesson.lesson_mode;
   const newContentType = body.contentType ?? lesson.content_type;
-  const hasContent     = newLessonMode === 'content' || newLessonMode === 'content_and_simulation';
+  const hasContent      = CONTENT_MODES.includes(newLessonMode);
+  const hasSimulation   = SIMULATION_MODES.includes(newLessonMode);
 
   const fields = {};
   if (body.title            !== undefined) fields.title             = body.title;
@@ -534,13 +616,13 @@ exports.updateLesson = async (lessonId, body, actor) => {
     : {};
   if (body.simulationId     !== undefined) fields.simulation_id     = body.simulationId;
   if (body.catalogId        !== undefined) fields.catalog_id        = body.catalogId;
+  if (body.quizId           !== undefined) fields.quiz_id           = body.quizId;
   if (body.estimatedMinutes !== undefined) fields.estimated_minutes = body.estimatedMinutes;
   if (body.isRequired       !== undefined) fields.is_required       = body.isRequired;
   if (body.isPublished      !== undefined) fields.is_published      = body.isPublished;
 
   // Keep legacy type column in sync when mode/contentType changes
   if (body.lessonMode !== undefined || body.contentType !== undefined) {
-    const hasSimulation = newLessonMode === 'simulation' || newLessonMode === 'content_and_simulation';
     fields.type = hasSimulation && !hasContent
       ? 'simulation'
       : contentTypeToLegacyType(newContentType);
@@ -548,11 +630,31 @@ exports.updateLesson = async (lessonId, body, actor) => {
 
   const updated = await ModuleModel.updateLesson(lessonId, fields);
 
+  // Keep quizzes.lesson_id in sync with lessons.quiz_id (sync invariant — see
+  // migration 050): detach the old quiz (if any) and attach the new one.
+  if (body.quizId !== undefined && body.quizId !== lesson.quiz_id) {
+    if (lesson.quiz_id) await QuizModel.update(lesson.quiz_id, { lesson_id: null });
+    if (body.quizId) await QuizModel.update(body.quizId, { lesson_id: lessonId, module_id: mod.id });
+  }
+
   await AuditModel.log({
     institutionId: course.institution_id, actorId: actor.id, actorEmail: actor.email,
     action: 'lesson.update', entityType: 'Lesson', entityId: lessonId,
     delta: { before, after: { title: updated?.title, lessonMode: updated?.lesson_mode, isPublished: updated?.is_published } },
   });
+
+  if (!before.isPublished && updated?.is_published) {
+    recipientResolver.courseStudents(course.id).then((recipientIds) => eventDispatcher.emit('lesson.published', {
+      recipientIds,
+      senderId: actor.id,
+      institutionId: course.institution_id,
+      departmentId: course.department_id ?? null,
+      courseId: course.id,
+      moduleId: mod.id,
+      lessonId,
+      data: { lessonTitle: updated.title, courseTitle: course.title, courseId: course.id },
+    })).catch(() => {});
+  }
 
   return mapLesson(updated);
 };
@@ -604,6 +706,14 @@ exports.markLessonComplete = async (lessonId, actor) => {
 
   if (!lesson.is_published) {
     throw ApiError.forbidden('Cannot mark an unpublished lesson as complete.');
+  }
+
+  if (lesson.quiz_id) {
+    const attempts = await QuizAttemptModel.listByQuizAndUser(lesson.quiz_id, actor.id);
+    const hasSubmitted = attempts.some((a) => a.status !== 'in_progress');
+    if (!hasSubmitted) {
+      throw ApiError.badRequest('Submit the quiz before marking this lesson complete.');
+    }
   }
 
   const courseId = lesson.course_id ?? course.id;
@@ -690,6 +800,7 @@ exports.getCourseJourney = async (courseId, actor) => {
         type:             row.legacy_type,
         content:          row.content             ?? {},
         simulationId:     row.simulation_id       ?? null,
+        quizId:           row.quiz_id             ?? null,
         estimatedMinutes: row.estimated_minutes   ?? null,
         isRequired:       row.is_required,
         isPublished:      row.lesson_is_published,
@@ -705,6 +816,20 @@ exports.getCourseJourney = async (courseId, actor) => {
           thumbnailUrl:     row.sim_thumbnail_url       ?? null,
           launchType:       row.sim_launch_type         ?? null,
           buildStatus:      row.sim_build_status        ?? null,
+        } : null,
+        quiz: row.quiz_title ? {
+          id:                row.quiz_id,
+          title:             row.quiz_title,
+          description:       row.quiz_description        ?? null,
+          pointsPossible:    Number(row.quiz_points_possible),
+          passingScore:      row.quiz_passing_score      != null ? Number(row.quiz_passing_score)      : null,
+          passingPercentage: row.quiz_passing_percentage != null ? Number(row.quiz_passing_percentage) : null,
+          maxAttempts:       row.quiz_max_attempts,
+          timeLimitSeconds:  row.quiz_time_limit_seconds ?? null,
+          dueAt:             row.quiz_due_at             ?? null,
+          availableFrom:     row.quiz_available_from     ?? null,
+          availableUntil:    row.quiz_available_until    ?? null,
+          status:            row.quiz_status,
         } : null,
       });
     }

@@ -7,9 +7,11 @@
  */
 
 const { pool }                                 = require('../../config/database');
-const { CourseModel, AuditModel }              = require('../../db/models');
+const { CourseModel, AuditModel, UserModel }   = require('../../db/models');
 const { parsePagination, buildPaginationMeta } = require('../../utils/pagination');
 const ApiError                                 = require('../../utils/apiError');
+const eventDispatcher                          = require('../notifications/event-dispatcher.service');
+const recipientResolver                        = require('../notifications/recipient-resolver.service');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -30,13 +32,6 @@ async function initProgress(courseId, userId) {
   );
 }
 
-// Notification hook placeholder (SRS §7.2 step 6, §7.5 step 9)
-// Replace with NotificationService.dispatch() when the notification module is ready.
-function notifyAsync(event, payload) {
-  setImmediate(() => {
-    console.info('[notify:placeholder]', event, JSON.stringify(payload).slice(0, 120));
-  });
-}
 
 // ── Mappers ───────────────────────────────────────────────────────────────────
 
@@ -72,8 +67,13 @@ function mapCourse(row) {
     departmentCode:   row.department_code    ?? null,
     academicYearName: row.academic_year_name ?? null,
     semesterTermName: row.semester_term_name ?? null,
+    ...((row.instructor_first_name || row.instructor_last_name) && {
+      instructorName: `${row.instructor_first_name ?? ''} ${row.instructor_last_name ?? ''}`.trim(),
+    }),
   };
 }
+
+exports.mapCourse = mapCourse;
 
 function mapEnrollment(row) {
   if (!row) return null;
@@ -164,6 +164,16 @@ exports.list = async (query, actor) => {
     courses: rows.map(mapCourse),
     meta:    buildPaginationMeta(parseInt(total, 10), page, limit),
   };
+};
+
+// ── listMyEnrolled ────────────────────────────────────────────────────────────
+// Actively-enrolled courses for the calling user, independent of the "browse the
+// catalog" term/status filtering `list()` applies — used by "My Grades" so a
+// student's grades show up regardless of their current semester-term assignment.
+
+exports.listMyEnrolled = async (actor) => {
+  const rows = await CourseModel.listEnrolledByUser(actor.id);
+  return rows.map(mapCourse);
 };
 
 // ── create ────────────────────────────────────────────────────────────────────
@@ -334,7 +344,13 @@ exports.publish = async (id, actor) => {
   });
 
   // Notify enrolled students (SRS §7.5 step 9)
-  notifyAsync('course.published', { courseId: id, title: updated?.title, institutionId: course.institution_id });
+  recipientResolver.courseStudents(id).then((recipientIds) => eventDispatcher.emit('course.published', {
+    recipientIds,
+    institutionId: course.institution_id,
+    departmentId: course.department_id ?? null,
+    courseId: id,
+    data: { courseTitle: updated?.title, courseId: id },
+  })).catch(() => {});
 
   return mapCourse(updated);
 };
@@ -521,9 +537,27 @@ exports.enroll = async (id, body, actor) => {
   });
 
   // 9. Notification hooks (SRS §7.2 step 6)
-  notifyAsync('enrollment.confirmed', { courseId: id, userId: targetUserId, status, enrollmentType });
-  if (enrollmentType === 'approval' && isSelfEnroll) {
-    notifyAsync('enrollment.pending_approval', { courseId: id, userId: targetUserId, instructorId: course.instructor_id });
+  if (status === 'active') {
+    eventDispatcher.emit('enrollment.confirmed', {
+      recipientIds: [targetUserId],
+      institutionId: course.institution_id,
+      departmentId: course.department_id ?? null,
+      courseId: id,
+      data: { courseTitle: course.title, courseId: id },
+    });
+  }
+  if (enrollmentType === 'approval' && isSelfEnroll && course.instructor_id) {
+    UserModel.findById(targetUserId).then((studentUser) => eventDispatcher.emit('enrollment.pending_approval', {
+      recipientIds: [course.instructor_id],
+      senderId: targetUserId,
+      institutionId: course.institution_id,
+      departmentId: course.department_id ?? null,
+      courseId: id,
+      data: {
+        studentName: `${studentUser?.first_name ?? ''} ${studentUser?.last_name ?? ''}`.trim(),
+        courseTitle: course.title, courseId: id,
+      },
+    })).catch(() => {});
   }
 
   return mapEnrollment(enrollment);
@@ -570,7 +604,14 @@ exports.approveEnrollment = async (id, targetUserId, actor) => {
   });
 
   // Notify student that enrollment was approved (SRS §7.2)
-  notifyAsync('enrollment.approved', { courseId: id, userId: targetUserId });
+  eventDispatcher.emit('enrollment.approved', {
+    recipientIds: [targetUserId],
+    senderId: actor.id,
+    institutionId: course.institution_id,
+    departmentId: course.department_id ?? null,
+    courseId: id,
+    data: { courseTitle: course.title, courseId: id },
+  });
 
   return mapEnrollment(updated);
 };
@@ -602,6 +643,17 @@ exports.unenroll = async (id, targetUserId, actor) => {
     action: 'course.unenroll', entityType: 'Enrollment', entityId: id,
     delta: { before: { status: existing.status }, after: { status: newStatus, userId: targetUserId } },
   });
+
+  if (newStatus === 'rejected' && !isSelf) {
+    eventDispatcher.emit('enrollment.rejected', {
+      recipientIds: [targetUserId],
+      senderId: actor.id,
+      institutionId: course.institution_id,
+      departmentId: course.department_id ?? null,
+      courseId: id,
+      data: { courseTitle: course.title, courseId: id },
+    });
+  }
 };
 
 // ── myEnrollment ──────────────────────────────────────────────────────────────

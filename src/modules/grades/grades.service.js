@@ -10,6 +10,7 @@
 const { pool }      = require('../../config/database');
 const { GradeModel, CourseModel, AuditModel } = require('../../db/models');
 const ApiError      = require('../../utils/apiError');
+const eventDispatcher = require('../notifications/event-dispatcher.service');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -34,6 +35,8 @@ function mapItem(row) {
     itemType:     row.item_type,
     lessonId:     row.lesson_id     ?? null,
     simulationId: row.simulation_id ?? null,
+    quizId:       row.quiz_id       ?? null,
+    categoryId:   row.category_id   ?? null,
     maxPoints:    Number(row.max_points),
     weight:       Number(row.weight),
     dueDate:      row.due_date      ?? null,
@@ -44,16 +47,18 @@ function mapItem(row) {
 function mapGrade(row) {
   if (!row) return null;
   return {
-    id:             row.id,
-    gradeItemId:    row.grade_item_id,
-    userId:         row.user_id,
-    score:          row.score           != null ? Number(row.score)           : null,
-    pointsPossible: row.points_possible != null ? Number(row.points_possible) : null,
-    isOverride:     row.is_override,
-    overrideNote:   row.override_note ?? null,
-    gradedBy:       row.graded_by     ?? null,
-    gradedAt:       row.graded_at     ?? null,
-    institutionId:  row.institution_id ?? null,
+    id:                 row.id,
+    gradeItemId:        row.grade_item_id,
+    userId:             row.user_id,
+    score:              row.score           != null ? Number(row.score)           : null,
+    pointsPossible:     row.points_possible != null ? Number(row.points_possible) : null,
+    isOverride:         row.is_override,
+    overrideNote:       row.override_note ?? null,
+    gradedBy:           row.graded_by     ?? null,
+    gradedAt:           row.graded_at     ?? null,
+    institutionId:      row.institution_id ?? null,
+    quizAttemptId:      row.quiz_attempt_id      ?? null,
+    simulationScoreId:  row.simulation_score_id  ?? null,
   };
 }
 
@@ -77,12 +82,14 @@ exports.getGradebook = async (courseId, q, actor) => {
   for (const row of rows) {
     if (!itemMap[row.grade_item_id]) {
       itemMap[row.grade_item_id] = {
-        id:        row.grade_item_id,
-        title:     row.item_title,
-        itemType:  row.item_type,
-        maxPoints: Number(row.max_points),
-        weight:    Number(row.weight),
-        dueDate:   row.due_date ?? null,
+        id:           row.grade_item_id,
+        title:        row.item_title,
+        itemType:     row.item_type,
+        quizId:       row.quiz_id       ?? null,
+        simulationId: row.simulation_id ?? null,
+        maxPoints:    Number(row.max_points),
+        weight:       Number(row.weight),
+        dueDate:      row.due_date ?? null,
       };
     }
     if (!studentMap[row.user_id]) {
@@ -93,10 +100,13 @@ exports.getGradebook = async (courseId, q, actor) => {
     if (!grid[row.user_id]) grid[row.user_id] = {};
     if (row.score != null || row.graded_at != null) {
       grid[row.user_id][row.grade_item_id] = {
-        score:          row.score           != null ? Number(row.score)           : null,
-        pointsPossible: row.points_possible != null ? Number(row.points_possible) : null,
-        isOverride:     row.is_override,
-        gradedAt:       row.graded_at ?? null,
+        id:                 row.grade_id,
+        score:              row.score           != null ? Number(row.score)           : null,
+        pointsPossible:     row.points_possible != null ? Number(row.points_possible) : null,
+        isOverride:         row.is_override,
+        gradedAt:           row.graded_at ?? null,
+        quizAttemptId:      row.quiz_attempt_id     ?? null,
+        simulationScoreId:  row.simulation_score_id ?? null,
       };
     }
   }
@@ -128,6 +138,8 @@ exports.createItem = async (courseId, body, actor) => {
     itemType:     body.itemType     ?? 'simulation',
     lessonId:     body.lessonId     ?? null,
     simulationId: body.simulationId ?? null,
+    quizId:       body.quizId       ?? null,
+    categoryId:   body.categoryId   ?? null,
     maxPoints:    body.maxPoints    ?? 100,
     weight:       body.weight       ?? 1,
     dueDate:      body.dueDate      ?? null,
@@ -154,10 +166,11 @@ exports.updateItem = async (itemId, body, actor) => {
 
   const fields = [];
   const params = [];
-  if (body.title     !== undefined) { params.push(body.title);     fields.push(`title = $${params.length}`); }
-  if (body.maxPoints !== undefined) { params.push(body.maxPoints); fields.push(`max_points = $${params.length}`); }
-  if (body.weight    !== undefined) { params.push(body.weight);    fields.push(`weight = $${params.length}`); }
-  if (body.dueDate   !== undefined) { params.push(body.dueDate);   fields.push(`due_date = $${params.length}`); }
+  if (body.title      !== undefined) { params.push(body.title);      fields.push(`title = $${params.length}`); }
+  if (body.maxPoints  !== undefined) { params.push(body.maxPoints);  fields.push(`max_points = $${params.length}`); }
+  if (body.weight     !== undefined) { params.push(body.weight);     fields.push(`weight = $${params.length}`); }
+  if (body.dueDate    !== undefined) { params.push(body.dueDate);    fields.push(`due_date = $${params.length}`); }
+  if (body.categoryId !== undefined) { params.push(body.categoryId); fields.push(`category_id = $${params.length}`); }
 
   if (!fields.length) return mapItem(item);
 
@@ -236,6 +249,15 @@ exports.submitGrade = async (courseId, body, actor) => {
     delta: { after: { gradeItemId, userId, score } },
   });
 
+  eventDispatcher.emit('grade.posted', {
+    recipientIds: [userId],
+    senderId: actor.id,
+    institutionId,
+    departmentId: course.department_id ?? null,
+    courseId,
+    data: { activityTitle: item.title, courseTitle: course.title, courseId },
+  });
+
   return mapGrade({ ...grade, institution_id: institutionId });
 };
 
@@ -244,7 +266,7 @@ exports.submitGrade = async (courseId, body, actor) => {
 
 exports.updateGrade = async (gradeId, body, actor) => {
   const { rows: [gradeRow] } = await pool.query(
-    `SELECT g.*, gi.course_id FROM grades g
+    `SELECT g.*, gi.course_id, gi.title AS item_title FROM grades g
        JOIN grade_items gi ON gi.id = g.grade_item_id
       WHERE g.id = $1`,
     [gradeId],
@@ -272,6 +294,15 @@ exports.updateGrade = async (gradeId, body, actor) => {
     institutionId: course.institution_id, actorId: actor.id, actorEmail: actor.email,
     action: 'grade.override', entityType: 'Grade', entityId: gradeId,
     delta: { before: { score: gradeRow.score }, after: { score: body.score, overrideNote: body.overrideNote } },
+  });
+
+  eventDispatcher.emit('grade.overridden', {
+    recipientIds: [gradeRow.user_id],
+    senderId: actor.id,
+    institutionId: course.institution_id,
+    departmentId: course.department_id ?? null,
+    courseId: gradeRow.course_id,
+    data: { activityTitle: gradeRow.item_title, courseTitle: course.title, courseId: gradeRow.course_id },
   });
 
   return mapGrade(updated);

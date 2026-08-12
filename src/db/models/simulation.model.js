@@ -14,6 +14,7 @@ const SIM_COLS = `
   scoring_config, learning_objectives, status, visibility, version,
   launch_type, build_uuid, original_zip_filename, storage_path,
   public_entry_url, entry_file, build_status, build_validation, file_size_bytes,
+  is_featured, featured_order,
   created_by, created_at, updated_at
 `;
 
@@ -24,6 +25,21 @@ const SimulationModel = {
       [id],
     );
     return rows[0] ?? null;
+  },
+
+  /** WebGL build_status rollup (ready/failed/pending) — super_admin system-health KPI. */
+  async countByBuildStatus({ institutionId } = {}) {
+    const params = [];
+    const filters = ["deleted_at IS NULL", "launch_type = 'webgl'"];
+    if (institutionId) filters.push(`institution_id = $${params.push(institutionId)}`);
+    const { rows } = await pool.query(
+      `SELECT build_status, COUNT(*) AS total FROM simulations
+        WHERE ${filters.join(' AND ')} GROUP BY build_status`,
+      params,
+    );
+    const byStatus = { ready: 0, failed: 0, processing: 0 };
+    rows.forEach((r) => { if (r.build_status) byStatus[r.build_status] = parseInt(r.total, 10); });
+    return byStatus;
   },
 
   async findByBuildUuid(buildUuid) {
@@ -118,7 +134,7 @@ const SimulationModel = {
       'estimated_minutes','difficulty','max_score','pass_score','max_attempts',
       'scoring_config','learning_objectives','status','visibility','version',
       'launch_type','build_status','build_validation','public_entry_url','storage_path',
-      'build_uuid','entry_file',
+      'is_featured','featured_order',
     ];
     const sets = [];
     const params = [];

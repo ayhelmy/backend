@@ -36,6 +36,32 @@ const AuditModel = {
     return rows[0];
   },
 
+  async findById(id) {
+    const { rows } = await pool.query(
+      `SELECT id, institution_id, actor_id, actor_email, action,
+              entity_type, entity_id, delta, ip_address, occurred_at
+         FROM audit_logs WHERE id = $1`,
+      [id],
+    );
+    return rows[0] ?? null;
+  },
+
+  async count({ institutionId, actorId, entityType, entityId, action } = {}) {
+    const params = [];
+    const filters = [];
+    if (institutionId) filters.push(`institution_id = $${params.push(institutionId)}`);
+    if (actorId)       filters.push(`actor_id = $${params.push(actorId)}`);
+    if (entityType)    filters.push(`entity_type = $${params.push(entityType)}`);
+    if (entityId)      filters.push(`entity_id = $${params.push(entityId)}`);
+    if (action)        filters.push(`action LIKE $${params.push(action + '%')}`);
+    const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+    const { rows } = await pool.query(
+      `SELECT COUNT(*) AS total FROM audit_logs ${where}`,
+      params,
+    );
+    return parseInt(rows[0].total, 10);
+  },
+
   async list({ institutionId, actorId, entityType, entityId, action, limit = 50, offset = 0 } = {}) {
     const params = [limit, offset];
     const filters = [];
