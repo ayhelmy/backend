@@ -7,7 +7,6 @@
  */
 'use strict';
 
-const { ZipArchive } = require('archiver');
 const { QuizModel, QuizQuestionModel, CourseModel, AuditModel } = require('../../db/models');
 const ApiError = require('../../utils/apiError');
 const { assertCourseScope } = require('./quizzes.service');
@@ -224,6 +223,7 @@ exports.streamQuizAsQti = async (courseId, quizId, actor, res) => {
     delta: { after: { courseId, questionCount: questions.length, exportedAt: new Date().toISOString() } },
   });
 
+  const { ZipArchive } = await import('archiver');
   const archive = new ZipArchive({ zlib: { level: 9 } });
   archive.on('error', (err) => { throw err; });
   archive.pipe(res);
