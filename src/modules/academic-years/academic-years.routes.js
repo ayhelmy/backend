@@ -19,7 +19,6 @@ const { body } = require('express-validator');
 const validate = require('../../middleware/validate');
 
 const router = Router();
-router.use(authenticate);
 
 const canView   = requireAnyPermission('academic_years.view', 'academic_years.manage', 'academic_years.create');
 const canManage = requireAnyPermission('academic_years.create', 'academic_years.manage');
@@ -34,12 +33,12 @@ const validators = [
 ];
 
 // List & create under a department
-router.get('/departments/:departmentId/academic-years',  canView,   c.list);
-router.post('/departments/:departmentId/academic-years', canManage, validators, validate, c.create);
+router.get('/departments/:departmentId/academic-years',  authenticate, canView,   c.list);
+router.post('/departments/:departmentId/academic-years', authenticate, canManage, validators, validate, c.create);
 
 // Single resource operations
-router.get('/academic-years/:id',    canView,   c.getOne);
-router.patch('/academic-years/:id',  canManage, validators.map(v => v.optional ? v : v), validate, c.update);
-router.delete('/academic-years/:id', requireAnyPermission('academic_years.manage'), c.remove);
+router.get('/academic-years/:id',    authenticate, canView,   c.getOne);
+router.patch('/academic-years/:id',  authenticate, canManage, validators.map(v => v.optional ? v : v), validate, c.update);
+router.delete('/academic-years/:id', authenticate, requireAnyPermission('academic_years.manage'), c.remove);
 
 module.exports = router;
