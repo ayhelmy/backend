@@ -19,7 +19,6 @@ const { body } = require('express-validator');
 const validate = require('../../middleware/validate');
 
 const router = Router();
-router.use(authenticate);
 
 const canView   = requireAnyPermission('semester_terms.view', 'semester_terms.manage', 'semester_terms.create');
 const canManage = requireAnyPermission('semester_terms.create', 'semester_terms.manage');
@@ -34,16 +33,17 @@ const validators = [
 ];
 
 // Nested under academic year
-router.get('/academic-years/:academicYearId/semester-terms',  canView,   c.list);
-router.post('/academic-years/:academicYearId/semester-terms', canManage, validators, validate, c.create);
+router.get('/academic-years/:academicYearId/semester-terms',  authenticate, canView,   c.list);
+router.post('/academic-years/:academicYearId/semester-terms', authenticate, canManage, validators, validate, c.create);
 
 // Single resource
-router.get('/semester-terms/:id',    canView,   c.getOne);
-router.patch('/semester-terms/:id',  canManage, validators, validate, c.update);
-router.delete('/semester-terms/:id', requireAnyPermission('semester_terms.manage'), c.remove);
+router.get('/semester-terms/:id',    authenticate, canView,   c.getOne);
+router.patch('/semester-terms/:id',  authenticate, canManage, validators, validate, c.update);
+router.delete('/semester-terms/:id', authenticate, requireAnyPermission('semester_terms.manage'), c.remove);
 
 // Courses in a term
 router.get('/semester-terms/:termId/courses',
+  authenticate,
   requireAnyPermission('courses.view_all','courses.view_institution','courses.view_department','courses.view_own'),
   c.getCourses,
 );
