@@ -13,7 +13,8 @@
  * Super Admin (simulation_catalogs.manage_global):
  *   POST   /                            create simulation
  *   PATCH  /:id                         update simulation
- *   DELETE /:id                         delete simulation
+ *   GET    /:id/delete-impact           catalogs/courses/sessions a permanent delete touches
+ *   DELETE /:id                         permanently delete simulation (unassigns from catalogs)
  *
  * Authenticated launch (any logged-in user):
  *   POST /:id/launch                    launch with full access-control enforcement
@@ -49,6 +50,7 @@ router.get('/:id/preview', optionalAuth, simulationsController.preview);
 // ── Management (super_admin only) ─────────────────────────────────────────────
 router.post('/',     authenticate, requirePermission('simulation_catalogs.manage_global'), v.create, validate, simulationsController.create);
 router.patch('/:id', authenticate, requirePermission('simulation_catalogs.manage_global'), v.update, validate, simulationsController.update);
+router.get('/:id/delete-impact', authenticate, requirePermission('simulation_catalogs.manage_global'), simulationsController.deleteImpact);
 router.delete('/:id',authenticate, requirePermission('simulation_catalogs.manage_global'), simulationsController.remove);
 
 // ── Legacy institution-level assignment ───────────────────────────────────────

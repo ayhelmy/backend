@@ -1,5 +1,29 @@
-storage/
+# dependencies
 node_modules/
+
+# env files — set real values in Railway → Service → Variables
+.env
+.env.*
+!.env.example
+
+# local dev TLS certs (regenerate with `npm run gen-cert`)
+certs/*.pem
+
+# runtime uploads — in production these live on the Railway Volume
+storage/
+
+# logs / test output
+logs/
+*.log
+coverage/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# scratch artifacts
 temp_patch/
 git-diff-files.txt
 git-untracked-files.txt

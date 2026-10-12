@@ -16,6 +16,7 @@ const {
 const ApiError = require('../../utils/apiError');
 const eventDispatcher = require('../notifications/event-dispatcher.service');
 const recipientResolver = require('../notifications/recipient-resolver.service');
+const publicBaseUrl = require('../../utils/publicBaseUrl');
 
 // lesson_mode values that require each activity type (migration 050 adds the
 // 4 quiz combinations alongside the original 3 content/simulation modes).
@@ -936,7 +937,7 @@ exports.getLessonSimulationLaunch = async (courseId, lessonId, actor, req) => {
   }
 
   const launchUrl = sim.launch_type === 'webgl' && sim.public_entry_url
-    ? `${req.protocol}://${req.get('host')}${sim.public_entry_url}`
+    ? `${publicBaseUrl(req)}${sim.public_entry_url}`
     : sim.launch_url;
 
   await AuditModel.log({

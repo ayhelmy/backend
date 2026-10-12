@@ -18,6 +18,7 @@
 'use strict';
 
 const config = require('../config');
+const publicBaseUrl = require('../utils/publicBaseUrl');
 
 const MEDIA_PREFIXES = [
   config.storage.thumbnailsUrlPrefix,
@@ -68,7 +69,7 @@ function rewriteDeep(value, baseUrl) {
 module.exports = function mediaUrlRewriter(req, res, next) {
   const originalJson = res.json.bind(res);
   res.json = (body) => {
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const baseUrl = publicBaseUrl(req);
     return originalJson(rewriteDeep(body, baseUrl));
   };
   next();

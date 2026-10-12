@@ -14,7 +14,11 @@
  *   demo     — only demo_public + demo_and_institution simulations (guests or explicit request)
  */
 
+const path         = require('path');
+const fsp          = require('fs').promises;
+const config       = require('../../config');
 const { pool }       = require('../../config/database');
+const webglService   = require('./webgl.service');
 const { SimulationModel, SimulationCatalogModel, AuditModel } = require('../../db/models');
 const { parsePagination, buildPaginationMeta }                = require('../../utils/pagination');
 const ApiError       = require('../../utils/apiError');
@@ -213,6 +217,21 @@ exports.list = async (query, actor) => {
 
 // ── getOne ────────────────────────────────────────────────────────────────────
 
+/** Root catalog (discipline) id + name for a single simulation, or nulls if uncataloged. */
+async function getDiscipline(simulationId) {
+  const { rows } = await pool.query(
+    `SELECT root.id, root.name
+       FROM simulation_catalog_items sci
+       JOIN simulation_catalogs sc   ON sc.id = sci.catalog_id AND sc.deleted_at IS NULL
+       JOIN simulation_catalogs root ON root.id = COALESCE(sc.root_catalog_id, sc.id) AND root.deleted_at IS NULL
+      WHERE sci.simulation_id = $1
+      ORDER BY root.name
+      LIMIT 1`,
+    [simulationId],
+  );
+  return { catalogId: rows[0]?.id ?? null, discipline: rows[0]?.name ?? null };
+}
+
 exports.getOne = async (id, actor) => {
   const sim = await SimulationModel.findById(id);
   if (!sim) throw ApiError.notFound('Simulation not found.');
@@ -224,7 +243,7 @@ exports.getOne = async (id, actor) => {
     if (!['demo_public', 'demo_and_institution'].includes(sim.visibility)) {
       throw ApiError.notFound('Simulation not found.');
     }
-    return mapSim(sim);
+    return { ...mapSim(sim), ...(await getDiscipline(id)) };
   }
 
   if (sim.visibility === 'private' && !isSuperAdmin) {
@@ -238,7 +257,7 @@ exports.getOne = async (id, actor) => {
     if (!assigned) throw ApiError.notFound('Simulation not found.');
   }
 
-  return mapSim(sim);
+  return { ...mapSim(sim), ...(await getDiscipline(id)) };
 };
 
 // ── create ────────────────────────────────────────────────────────────────────
@@ -318,20 +337,111 @@ exports.update = async (id, body, actor) => {
 
 // ── remove ────────────────────────────────────────────────────────────────────
 
+/** Looks up a simulation row for deletion — includes already soft-deleted rows. */
+async function findForDelete(id) {
+  const { rows: [sim] } = await pool.query(
+    'SELECT id, title, build_uuid FROM simulations WHERE id = $1', [id],
+  );
+  if (!sim) throw ApiError.notFound('Simulation not found.');
+  return sim;
+}
+
+/**
+ * What a permanent delete will touch — shown in the confirmation dialog.
+ * Lessons are detached (FK ON DELETE SET NULL), not deleted.
+ */
+exports.getDeleteImpact = async (id, actor) => {
+  assertCanManageGlobal(actor);
+  const sim = await findForDelete(id);
+
+  const [{ rows: catalogs }, { rows: courses }, { rows: [counts] }] = await Promise.all([
+    pool.query(
+      `SELECT sc.id, sc.name FROM simulation_catalog_items sci
+         JOIN simulation_catalogs sc ON sc.id = sci.catalog_id
+        WHERE sci.simulation_id = $1 ORDER BY sc.name`, [id],
+    ),
+    pool.query(
+      `SELECT c.id, c.title, COUNT(l.id)::int AS lesson_count FROM lessons l
+         JOIN courses c ON c.id = l.course_id
+        WHERE l.simulation_id = $1 GROUP BY c.id, c.title ORDER BY c.title`, [id],
+    ),
+    pool.query(
+      `SELECT (SELECT COUNT(*) FROM simulation_sessions          WHERE simulation_id = $1)::int AS sessions,
+              (SELECT COUNT(*) FROM simulation_activity_sessions WHERE simulation_id = $1)::int AS activity_sessions,
+              (SELECT COUNT(*) FROM simulation_scores            WHERE simulation_id = $1)::int AS scores`, [id],
+    ),
+  ]);
+
+  return {
+    simulation: { id: sim.id, title: sim.title },
+    catalogs,
+    courses: courses.map((c) => ({ id: c.id, title: c.title, lessonCount: c.lesson_count })),
+    sessionCount:  counts.sessions + counts.activity_sessions,
+    scoreCount:    counts.scores,
+  };
+};
+
+/**
+ * Permanently deletes a simulation (super_admin only):
+ *  - unassigns it from every catalog (simulation_catalog_items cascade)
+ *  - deletes its sessions, scores, steps, click regions, tags, experiments (FK cascades)
+ *  - detaches course lessons, grade items and LTI links (FK SET NULL)
+ *  - deletes FM103 tracking data keyed by its build_uuid (lms_* tables, no FK)
+ *  - removes its WebGL build folder and thumbnail / click-region images from disk
+ */
 exports.remove = async (id, actor) => {
   assertCanManageGlobal(actor);
+  const sim = await findForDelete(id);
+  const impact = await exports.getDeleteImpact(id, actor);
 
-  const sim = await SimulationModel.findById(id);
-  if (!sim) throw ApiError.notFound('Simulation not found.');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    if (sim.build_uuid) {
+      // FK order: saved results -> attempts (cascade step states/answers) -> sessions -> releases -> definitions
+      for (const table of ['lms_saved_results', 'lms_experiment_attempts', 'lms_learner_sessions',
+        'lms_registered_releases', 'lms_assessment_definitions']) {
+        await client.query(`DELETE FROM ${table} WHERE project_id = $1`, [sim.build_uuid]);
+      }
+    }
+    await client.query('DELETE FROM simulations WHERE id = $1', [id]);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 
-  await SimulationModel.softDelete(id);
+  // Files go only after the DB commit succeeded; a failure here leaves harmless orphans.
+  await removeSimulationFiles(id, sim.build_uuid);
 
   await AuditModel.log({
     institutionId: actor.institutionId, actorId: actor.id, actorEmail: actor.email,
     action: 'simulation.delete', entityType: 'Simulation', entityId: id,
-    delta: { before: { title: sim.title } },
+    delta: {
+      before: {
+        title: sim.title,
+        buildUuid: sim.build_uuid,
+        catalogs: impact.catalogs.map((c) => c.name),
+        detachedCourses: impact.courses.map((c) => c.title),
+      },
+    },
   });
 };
+
+async function removeSimulationFiles(simId, buildUuid) {
+  try { await webglService.removeBuildFolder(buildUuid); } catch (_) {}
+
+  const thumbDir = path.isAbsolute(config.storage.thumbnailsDir)
+    ? config.storage.thumbnailsDir
+    : path.resolve(__dirname, '../../..', config.storage.thumbnailsDir);
+  let entries = [];
+  try { entries = await fsp.readdir(thumbDir); } catch (_) { return; }
+  // Thumbnail is "{simId}.{ext}", click-region reference image "{simId}-regions.{ext}".
+  const own = entries.filter((f) => f.startsWith(`${simId}.`) || f.startsWith(`${simId}-regions.`));
+  await Promise.all(own.map((f) => fsp.unlink(path.join(thumbDir, f)).catch(() => {})));
+}
 
 // ── getPreviewUrl ─────────────────────────────────────────────────────────────
 
@@ -404,8 +514,18 @@ exports.listDemo = async (query) => {
   const { rows } = await pool.query(
     `SELECT DISTINCT s.id, s.title, s.description, s.type, s.thumbnail_url, s.estimated_minutes,
             s.difficulty, s.visibility, s.status, s.version, s.learning_objectives,
-            s.launch_type, s.build_status, s.created_at
+            s.launch_type, s.build_status, s.created_at,
+            disc.name AS discipline_name
        FROM simulations s ${joinClause}
+       LEFT JOIN LATERAL (
+         SELECT root.name
+           FROM simulation_catalog_items sci2
+           JOIN simulation_catalogs sc2   ON sc2.id = sci2.catalog_id AND sc2.deleted_at IS NULL
+           JOIN simulation_catalogs root ON root.id = COALESCE(sc2.root_catalog_id, sc2.id) AND root.deleted_at IS NULL
+          WHERE sci2.simulation_id = s.id
+          ORDER BY root.name
+          LIMIT 1
+       ) disc ON TRUE
       WHERE ${where}
       ORDER BY s.title
       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
@@ -419,7 +539,7 @@ exports.listDemo = async (query) => {
 
   const total = parseInt(countRows[0]?.total || '0', 10);
   return {
-    simulations: rows.map(mapSim),
+    simulations: rows.map((row) => ({ ...mapSim(row), discipline: row.discipline_name ?? null })),
     meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
   };
 };

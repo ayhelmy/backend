@@ -32,7 +32,7 @@ The app fails fast at startup if any of these are missing:
 | Variable | Purpose |
 |---|---|
 | `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET` | Sign access/refresh tokens |
-| `DB_NAME` / `DB_USER` / `DB_PASSWORD` | Postgres connection |
+| `DATABASE_URL` **or** `DB_NAME` / `DB_USER` / `DB_PASSWORD` | Postgres connection (`DATABASE_URL` wins when set, e.g. on Railway) |
 | `LTI_KEY_ENCRYPTION_SECRET` | Encrypts LTI tool signing keys at rest |
 | `LTI_TOOL_BASE_URL` | Public base URL of this backend, used in LTI OIDC redirects |
 
@@ -90,9 +90,10 @@ Each feature module under `src/modules/` follows the same shape: `*.routes.js` w
 
 ### Auth flow
 
-- Login returns a short-lived JWT **access token** (kept in memory on the client, sent as `Authorization: Bearer <token>`) and sets an HttpOnly, `Secure`, `SameSite=None` **refresh cookie**.
-- `SameSite=None` is required, not optional, in this deployment: frontend and backend run on different registrable domains (e.g. Vercel + Railway), which is a genuinely cross-site setup. `SameSite=Strict` or `Lax` here means the browser silently never sends the refresh cookie back to the API.
-- The refresh cookie is a **host-only** cookie (no `Domain` attribute) — it belongs to this API's own domain, not the frontend's. It will never be visible to anything running on the frontend's domain (including any Next.js middleware there that tries to read cookies server-side). Auth state on the frontend must come from the API response (Bearer token + user object in memory), not from inspecting cookies client- or server-side.
+- Login returns a short-lived JWT **access token** (kept in memory on the client, sent as `Authorization: Bearer <token>`) and sets an HttpOnly, `Secure`, `SameSite=Strict` (in production) **refresh cookie**.
+- The frontend (Vercel) does not call this API cross-site: its `next.config.ts` rewrites `/api/v1/*` on the frontend's own domain to this backend. The browser therefore sees the API as same-origin, and the host-only refresh cookie lands on the **frontend's** domain, so `SameSite=Strict` works and the frontend's `proxy.ts` auth guard can see it.
+- Large multipart uploads (WebGL builds, lesson files) skip the rewrite and hit this backend directly (Bearer auth, no cookie), so `CORS_ORIGIN` must list the frontend origin.
+- Leave `COOKIE_DOMAIN` unset for this setup; it is only for a frontend/backend pair on sibling subdomains of one domain.
 
 ### Persistent storage gotcha
 
@@ -100,8 +101,12 @@ Each feature module under `src/modules/` follows the same shape: `*.routes.js` w
 
 ### Seed script safety
 
-`seed.js` unconditionally `DELETE`s and recreates all simulations, catalogs, sessions, and grades every time it runs, and most PaaS start commands (`npm run migrate && npm run seed && npm start`) run it on **every deploy**. The `NODE_ENV=production` guard is what stops every redeploy from wiping real data — make sure `NODE_ENV` is actually set to `production` in your deployment's environment variables, not just assumed.
+`seed.js` unconditionally `DELETE`s and recreates all simulations, catalogs, sessions, and grades every time it runs. It is no longer part of the deploy command, and the `NODE_ENV=production` guard still refuses to run it unless `ALLOW_PRODUCTION_SEED=yes-i-am-sure` is set — make sure `NODE_ENV` is actually set to `production` in your deployment's environment variables, not just assumed.
+
+### Migration numbering
+
+Two development lines once numbered the same migrations differently (044–065 vs 046–067; local-only ones became 068–071). `migrate.js` has a `RENAMED_FROM` map so a database that applied a migration under its old filename skips it under the new one. Never renumber an applied migration again — add new ones after the highest number.
 
 ## Deployment
 
-Configured for Railway: `npm run migrate && npm run seed && npm start` as the start command, with Postgres and Redis as separate services on the same project. Set every environment variable from the table above on the `backend` service (Railway does not read `.env` files at runtime).
+Configured for Railway via `railway.json` + `Dockerfile` (config-as-code overrides any start command set in the dashboard): `npm run migrate` runs as the pre-deploy command, then `node server.js`, health-checked at `/api/v1/health`. Postgres and Redis run as separate services in the same project. See [DEPLOYMENT.md](DEPLOYMENT.md) for the full variable list and the Vercel frontend pairing.

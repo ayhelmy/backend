@@ -143,6 +143,20 @@ router.get('/:id/simulation-catalogs',
   },
 );
 
+// GET /institutions/:id/simulation-catalogs/tree — nested tree of catalogs assigned
+// to this specific institution (super_admin may pass any institution id; other
+// roles are restricted to their own institution via requireInstitutionScope).
+router.get('/:id/simulation-catalogs/tree',
+  requireAnyPermission('simulation_catalogs.view_assigned', 'simulations.view_catalog', 'simulation_catalogs.manage_global'),
+  requireInstitutionScope(),
+  async (req, res, next) => {
+    try {
+      ApiResponse.ok(res, 'Institution simulation catalog tree',
+        await catalogSvc.getInstitutionTree(req.params.id, req.user));
+    } catch (e) { next(e); }
+  },
+);
+
 router.post('/:id/simulation-catalogs',
   requirePermission('simulation_catalogs.assign_to_institution'),
   body('catalogId').isUUID().withMessage('catalogId must be a valid UUID'),

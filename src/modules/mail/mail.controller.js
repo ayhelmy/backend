@@ -2,6 +2,7 @@
 
 const svc = require('./mail.service');
 const ApiResponse = require('../../utils/apiResponse');
+const publicBaseUrl = require('../../utils/publicBaseUrl');
 
 const wrap = (fn) => async (req, res, next) => { try { await fn(req, res); } catch (e) { next(e); } };
 
@@ -35,6 +36,6 @@ exports.listRecipients = wrap(async (req, res) => ApiResponse.ok(res, 'Recipient
 
 exports.uploadAttachment = wrap(async (req, res) => {
   if (!req.file) return res.status(400).json({ status: 400, title: 'Bad Request', detail: 'No file uploaded.' });
-  const serverUrl = `${req.protocol}://${req.get('host')}`;
+  const serverUrl = publicBaseUrl(req);
   ApiResponse.ok(res, 'Attachment uploaded', await svc.uploadAttachment(req.file, serverUrl));
 });

@@ -10,11 +10,11 @@ require('dotenv').config();
 const required = [
   'JWT_ACCESS_SECRET',
   'JWT_REFRESH_SECRET',
-  'DB_NAME',
-  'DB_USER',
-  'DB_PASSWORD',
   'LTI_KEY_ENCRYPTION_SECRET',
   'LTI_TOOL_BASE_URL',
+  // Railway's Postgres plugin exposes a single DATABASE_URL; local dev uses
+  // the discrete DB_* vars. One of the two must be present.
+  ...(process.env.DATABASE_URL ? [] : ['DB_NAME', 'DB_USER', 'DB_PASSWORD']),
 ];
 
 for (const key of required) {
@@ -29,6 +29,9 @@ module.exports = {
   apiVersion: process.env.API_VERSION || 'v1',
 
   db: {
+    // Takes precedence over the discrete DB_* vars when set (Railway).
+    url: process.env.DATABASE_URL || undefined,
+    ssl: process.env.DB_SSL === 'true',
     host: process.env.DB_HOST || 'localhost',
     port: parseInt(process.env.DB_PORT, 10) || 5432,
     name: process.env.DB_NAME,
@@ -41,8 +44,7 @@ module.exports = {
   },
 
   redis: {
-    // Railway (and most hosts) inject a single REDIS_URL rather than
-    // discrete host/port/password vars; prefer it when present.
+    // Takes precedence over REDIS_HOST/PORT/PASSWORD when set (Railway).
     url: process.env.REDIS_URL || undefined,
     host: process.env.REDIS_HOST || 'localhost',
     port: parseInt(process.env.REDIS_PORT, 10) || 6379,
@@ -72,14 +74,47 @@ module.exports = {
     cloudfrontUrl: process.env.AWS_CLOUDFRONT_URL,
   },
 
+  // Number of reverse-proxy hops in front of Node (Express `trust proxy`).
+  // Railway alone = 1. Requests proxied Vercel → Railway = 2, so req.ip is
+  // the real client rather than Vercel's egress IP (rate limiting, audit log).
+  trustProxyHops: parseInt(process.env.TRUST_PROXY_HOPS, 10) || 1,
+
+  // Public origin of THIS backend (e.g. https://simlearn-backend.up.railway.app).
+  // Used to build absolute media/launch URLs. When unset, falls back to the
+  // request's own protocol+host — fine for direct access, but wrong when the
+  // request arrives through the frontend's /api/v1 rewrite proxy.
+  publicBaseUrl: (process.env.PUBLIC_BASE_URL
+    || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '')
+  ).replace(/\/+$/, '') || undefined,
+
   rateLimit: {
     windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000,
     max: parseInt(process.env.RATE_LIMIT_MAX, 10) || 100,
   },
 
-  cors: {
-    origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
-  },
+  cors: (() => {
+    const list = (process.env.CORS_ORIGIN || 'http://localhost:3000')
+      .split(',')
+      .map((o) => o.trim())
+      .filter(Boolean);
+    return {
+      // Primary frontend origin — used to build absolute redirect URLs
+      // (e.g. LTI error/launch redirects back to the SPA).
+      origin: list[0],
+      // Full allowlist consulted by the CORS middleware in app.js. Supports
+      // a comma-separated CORS_ORIGIN so preview/staging frontends can be
+      // added without a code change.
+      allowedOrigins: list,
+    };
+  })(),
+
+  // Cookie `Domain` attribute for the refresh-token cookie. Leave unset for
+  // local dev (host-only cookie). In production, set to the shared parent
+  // domain (e.g. ".simulearn.example.com") so the cookie is visible to both
+  // the frontend (app.simulearn.example.com) and backend
+  // (api.simulearn.example.com) subdomains — required for the frontend's
+  // server-side auth guard (proxy.ts) to see the session cookie at all.
+  cookieDomain: process.env.COOKIE_DOMAIN || undefined,
 
   lti: {
     // Master key used to derive the AES-256-GCM key that encrypts tool

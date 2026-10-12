@@ -41,9 +41,9 @@ const SALT_ROUNDS = 12;
  * live database with real data. NODE_ENV=production skips it outright;
  * set ALLOW_PRODUCTION_SEED=yes-i-am-sure to override deliberately.
  *
- * Exits 0 (not 1) when skipped — Railway's start command chains this
- * script before `npm start`, so a non-zero exit here would abort the
- * deploy and take the whole app down. Skipping must never do that.
+ * Exits 0 (not 1) when skipped — if a deploy command chains this script
+ * before `npm start`, a non-zero exit here would abort the deploy and take
+ * the whole app down. Skipping must never do that.
  */
 function isSafeToSeed() {
   if (process.env.NODE_ENV === 'production' && process.env.ALLOW_PRODUCTION_SEED !== 'yes-i-am-sure') {
@@ -59,8 +59,7 @@ function isSafeToSeed() {
 
 async function seed() {
   if (!isSafeToSeed()) {
-    // Exit immediately with success — Railway's start command chains this
-    // script before `npm start`, and an unclosed pg pool could otherwise
+    // Exit immediately with success — an unclosed pg pool could otherwise
     // leave the process hanging instead of handing off to the server.
     process.exit(0);
   }
@@ -357,26 +356,54 @@ async function seed() {
 
     const storageBase = process.env.SIMULATION_STORAGE_PATH
       ? path.resolve(process.env.SIMULATION_STORAGE_PATH)
-      : path.resolve(__dirname, '../../../storage/simulations');
+      : path.resolve(__dirname, '../../storage/simulations');
+
+    // One real Unity WebGL build already exists on disk (uploaded via the
+    // normal upload UI during testing) — reuse it for every seeded
+    // simulation so they're actually playable instead of a blank
+    // placeholder page. Each simulation still gets its OWN storage folder
+    // (build_uuid is unique per row) — this just copies the same real
+    // content into each one. Swap in a real per-topic build later via the
+    // normal upload UI; re-running seed will not touch a simulation whose
+    // build_uuid has been changed by a real upload since.
+    const REAL_BUILD_SOURCE = path.join(storageBase, 'd5015d87-72c9-4ac8-b52c-20f5aee5ffc0');
+
+    function copyDirRecursive(src, dest) {
+      fs.mkdirSync(dest, { recursive: true });
+      for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+        const s = path.join(src, entry.name);
+        const d = path.join(dest, entry.name);
+        if (entry.isDirectory()) copyDirRecursive(s, d);
+        else fs.copyFileSync(s, d);
+      }
+    }
 
     function makeStubBuild(buildUuid, simTitle) {
-      const buildDir = path.join(storageBase, buildUuid, 'Build');
-      fs.mkdirSync(buildDir, { recursive: true });
-      const html = path.join(storageBase, buildUuid, 'index.html');
-      if (!fs.existsSync(html)) {
-        fs.writeFileSync(html,
-          `<!DOCTYPE html><html><head><title>${simTitle}</title><meta charset="utf-8"></head>` +
-          `<body style="background:#0d1117;color:#e6edf3;display:flex;align-items:center;` +
-          `justify-content:center;height:100vh;margin:0;font-family:system-ui,sans-serif;` +
-          `flex-direction:column;gap:16px">` +
-          `<h1 style="margin:0;font-size:1.5rem">${simTitle}</h1>` +
-          `<p style="color:#8b949e;margin:0">BEDO stub — upload a real Unity WebGL build to replace this.</p>` +
-          `</body></html>`,
-        );
+      const destDir = path.join(storageBase, buildUuid);
+      // Clean slate each run so an old blank-stub folder from a prior seed
+      // gets upgraded to the real build rather than merging with it.
+      fs.rmSync(destDir, { recursive: true, force: true });
+
+      if (fs.existsSync(REAL_BUILD_SOURCE) && fs.statSync(REAL_BUILD_SOURCE).isDirectory()) {
+        copyDirRecursive(REAL_BUILD_SOURCE, destDir);
+        return;
       }
+
+      // Fallback for environments without that asset (e.g. CI, a fresh
+      // clone with no storage/ directory yet) — blank placeholder page.
+      const buildDir = path.join(destDir, 'Build');
+      fs.mkdirSync(buildDir, { recursive: true });
+      fs.writeFileSync(path.join(destDir, 'index.html'),
+        `<!DOCTYPE html><html><head><title>${simTitle}</title><meta charset="utf-8"></head>` +
+        `<body style="background:#0d1117;color:#e6edf3;display:flex;align-items:center;` +
+        `justify-content:center;height:100vh;margin:0;font-family:system-ui,sans-serif;` +
+        `flex-direction:column;gap:16px">` +
+        `<h1 style="margin:0;font-size:1.5rem">${simTitle}</h1>` +
+        `<p style="color:#8b949e;margin:0">BEDO stub — upload a real Unity WebGL build to replace this.</p>` +
+        `</body></html>`,
+      );
       ['stub.loader.js', 'stub.wasm.gz', 'stub.data.gz'].forEach((f) => {
-        const fp = path.join(buildDir, f);
-        if (!fs.existsSync(fp)) fs.writeFileSync(fp, '');
+        fs.writeFileSync(path.join(buildDir, f), '');
       });
     }
 
@@ -401,55 +428,74 @@ async function seed() {
       refrigeration:      '00000000-0000-4000-8000-000000000017',
     };
 
-    // Deterministic SVG placeholder — demo simulations have no real photo until
-    // an admin uploads one via the catalog thumbnail-upload flow; this keeps
-    // cards from showing a blank image in the meantime.
-    const THUMB_COLORS = ['#F59324', '#059669', '#7C3AED', '#2563EB', '#DC2626', '#0EA5E9'];
-    function escXml(str) {
-      return String(str)
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    }
-    function placeholderThumbnail(title) {
-      const initials = (title.match(/[A-Za-z]+/g) || []).slice(0, 2).map((w) => w[0].toUpperCase()).join('') || 'SL';
-      let hash = 0;
-      for (let i = 0; i < title.length; i++) hash = (hash * 31 + title.charCodeAt(i)) >>> 0;
-      const color = THUMB_COLORS[hash % THUMB_COLORS.length];
-      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="225">`
-        + `<rect width="400" height="225" fill="#FDF2E3"/>`
-        + `<circle cx="200" cy="92" r="42" fill="${color}"/>`
-        + `<text x="200" y="105" font-family="system-ui,sans-serif" font-size="34" font-weight="700" fill="#ffffff" text-anchor="middle">${escXml(initials)}</text>`
-        + `<text x="200" y="172" font-family="system-ui,sans-serif" font-size="15" fill="#57534e" text-anchor="middle">${escXml(title)}</text>`
-        + `</svg>`;
-      return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+    // Fixed simulation `id`s — matching the real ids already in use on this
+    // database, whose thumbnails (below) are named after them. Pinning `id`
+    // (not just build_uuid) makes a fresh database deterministic too: the
+    // same simulation always gets the same id, so it lines up with these
+    // same thumbnail filenames wherever storage/thumbnails/ is shared/copied.
+    const SEED_SIM_IDS = {
+      plcControl:         'b6fd215c-4def-4f6d-83dd-860cfd481028',
+      sensorActuators:    '725eb7a2-1234-48b0-aee8-f217256735ca',
+      robotics:           'e3afecbd-6862-4664-9a66-630c53c99213',
+      fluidMechanics:     '2f2b86a0-4d1a-4d97-b522-6592a913e18c',
+      thermodynamics:     'b3863c00-d74a-4098-b06d-66136e8ba266',
+      electricalMachines: 'ae07a0fb-70e3-420a-ba9a-07c25ac49e16',
+      powerElectronics:   'b67e01eb-a36b-4351-95d3-aa8432b774f8',
+      engineSystems:      '708b776e-6bb2-4f6a-a881-787a817c2fb4',
+      physicsMechanics:   'da31f80a-bdbc-4b2d-a6ec-1196a0575149',
+      lightOptics:        '05e7338c-4d9a-4f93-bdec-119c58544a5a',
+      aiLab:              '45a07a7a-7a0e-45a4-8804-4b360c53f3a1',
+      networkSecurity:    '383f1db0-b21e-43ea-8726-acc4ca87f074',
+      safetyProcedures:   'c11550f4-7d18-43de-a9b0-e0bd3040e110',
+      electronicsLab:     '4d1fb7e3-9b7a-4040-8077-f7c529bdc489',
+      pumpPerformance:    'feeebd58-091b-4f1f-99d8-91dd45406411',
+      circuitAnalysis:    'bc476e68-3acb-4a9f-8d3c-aa3b6583f32d',
+      refrigeration:      '83318f84-9612-4715-bae7-17358a4b6664',
+    };
+
+    // Real thumbnails already uploaded (storage/thumbnails/{id}.png) — null
+    // where none exists yet (uploadable later via the catalog admin UI).
+    // Resolved the same way config.storage.thumbnailsDir is elsewhere
+    // (relative to process.cwd(), i.e. the backend root when run via
+    // `npm run seed`) — NOT __dirname-relative, which is easy to get
+    // off-by-one from a nested file like this one.
+    const thumbnailsBase = path.isAbsolute(config.storage.thumbnailsDir)
+      ? config.storage.thumbnailsDir
+      : path.resolve(config.storage.thumbnailsDir);
+
+    function seedThumbnailUrl(id) {
+      const file = path.join(thumbnailsBase, `${id}.png`);
+      return fs.existsSync(file) ? `/thumbnails/${id}.png` : null;
     }
 
-    async function insertSim({ uuid, title, description, difficulty, estimatedMinutes, visibility, objectives }) {
+    async function insertSim({ id, uuid, title, description, difficulty, estimatedMinutes, visibility, objectives }) {
       await client.query(`
         INSERT INTO simulations
-          (institution_id, title, description, type, launch_type,
+          (id, institution_id, title, description, type, launch_type,
            build_uuid, original_zip_filename, storage_path, public_entry_url, entry_file,
            build_status, build_validation, estimated_minutes,
            difficulty, max_score, pass_score, max_attempts, scoring_config,
            learning_objectives, status, visibility, version, created_by, thumbnail_url)
         VALUES
-          (NULL, $1, $2, 'webgl', 'webgl',
-           $3, $4, $5, $6, 'index.html',
-           'ready', '{"valid":true,"stub":true}', $7,
-           $8, 100, 70, 3, '{"hints_penalty":5,"max_hints":3}',
-           $9, 'active', $10, '1.0.0', $11, $12)
+          ($1, NULL, $2, $3, 'webgl', 'webgl',
+           $4, $5, $6, $7, 'index.html',
+           'ready', '{"valid":true,"stub":true}', $8,
+           $9, 100, 70, 3, '{"hints_penalty":5,"max_hints":3}',
+           $10, 'active', $11, '1.0.0', $12, $13)
         ON CONFLICT DO NOTHING
       `, [
+        id,
         title, description,
         uuid,
         `${title.toLowerCase().replace(/\s+/g, '-')}.zip`,
         // Relative — same convention as webgl.service.js's getRelativeBuildPath().
-        // `storageBase` (absolute) is only used below for the actual stub-file writes.
+        // `storageBase` (absolute) is only used below for the actual file writes.
         `${config.storage.simulationsDir}/${uuid}`.replace(/\\/g, '/'),
         `/simulations-runtime/${uuid}/index.html`,
         estimatedMinutes, difficulty,
         objectives, visibility,
-        userIds.superadmin, placeholderThumbnail(title),
+        userIds.superadmin,
+        seedThumbnailUrl(id),
       ]);
       makeStubBuild(uuid, title);
       const { rows: [r] } = await client.query(
@@ -461,6 +507,7 @@ async function seed() {
     const simIds = {};
 
     simIds.plcControl = await insertSim({
+      id: SEED_SIM_IDS.plcControl,
       uuid: SEED_SIMS.plcControl, title: 'PLC Control Systems Lab',
       description: 'Programme and simulate PLC ladder logic for industrial automation tasks.',
       difficulty: 'intermediate', estimatedMinutes: 45, visibility: 'demo_and_institution',
@@ -468,6 +515,7 @@ async function seed() {
     });
 
     simIds.sensorActuators = await insertSim({
+      id: SEED_SIM_IDS.sensorActuators,
       uuid: SEED_SIMS.sensorActuators, title: 'Sensor & Actuators Lab',
       description: 'Connect and calibrate industrial sensors and actuators in a virtual environment.',
       difficulty: 'beginner', estimatedMinutes: 30, visibility: 'demo_and_institution',
@@ -475,6 +523,7 @@ async function seed() {
     });
 
     simIds.robotics = await insertSim({
+      id: SEED_SIM_IDS.robotics,
       uuid: SEED_SIMS.robotics, title: 'Robotics Programming Lab',
       description: 'Programme robotic arms and mobile robots using ROS-style task blocks.',
       difficulty: 'intermediate', estimatedMinutes: 50, visibility: 'demo_and_institution',
@@ -482,6 +531,7 @@ async function seed() {
     });
 
     simIds.fluidMechanics = await insertSim({
+      id: SEED_SIM_IDS.fluidMechanics,
       uuid: SEED_SIMS.fluidMechanics, title: 'Fluid Mechanics Lab',
       description: 'Apply Bernoulli\'s equation and continuity to analyse pipe-flow systems.',
       difficulty: 'intermediate', estimatedMinutes: 40, visibility: 'demo_and_institution',
@@ -489,6 +539,7 @@ async function seed() {
     });
 
     simIds.thermodynamics = await insertSim({
+      id: SEED_SIM_IDS.thermodynamics,
       uuid: SEED_SIMS.thermodynamics, title: 'Thermodynamics Lab',
       description: 'Explore thermodynamic cycles, heat engines, and entropy concepts interactively.',
       difficulty: 'intermediate', estimatedMinutes: 45, visibility: 'demo_and_institution',
@@ -496,6 +547,7 @@ async function seed() {
     });
 
     simIds.refrigeration = await insertSim({
+      id: SEED_SIM_IDS.refrigeration,
       uuid: SEED_SIMS.refrigeration, title: 'Refrigeration & HVAC Lab',
       description: 'Simulate vapour-compression refrigeration cycles and HVAC system design.',
       difficulty: 'advanced', estimatedMinutes: 50, visibility: 'demo_and_institution',
@@ -503,6 +555,7 @@ async function seed() {
     });
 
     simIds.electricalMachines = await insertSim({
+      id: SEED_SIM_IDS.electricalMachines,
       uuid: SEED_SIMS.electricalMachines, title: 'Electrical Machines & Transformer Lab',
       description: 'Test DC/AC machines and transformers under various load conditions.',
       difficulty: 'intermediate', estimatedMinutes: 45, visibility: 'institution',
@@ -510,6 +563,7 @@ async function seed() {
     });
 
     simIds.powerElectronics = await insertSim({
+      id: SEED_SIM_IDS.powerElectronics,
       uuid: SEED_SIMS.powerElectronics, title: 'Power Electronics Lab',
       description: 'Design and test rectifiers, inverters, and DC-DC converters.',
       difficulty: 'advanced', estimatedMinutes: 55, visibility: 'institution',
@@ -517,6 +571,7 @@ async function seed() {
     });
 
     simIds.engineSystems = await insertSim({
+      id: SEED_SIM_IDS.engineSystems,
       uuid: SEED_SIMS.engineSystems, title: 'Engine Systems Lab',
       description: 'Explore internal combustion engine operation, valve timing, and diagnostics.',
       difficulty: 'intermediate', estimatedMinutes: 40, visibility: 'institution',
@@ -524,6 +579,7 @@ async function seed() {
     });
 
     simIds.physicsMechanics = await insertSim({
+      id: SEED_SIM_IDS.physicsMechanics,
       uuid: SEED_SIMS.physicsMechanics, title: 'Physics Mechanics Lab',
       description: 'Investigate Newton\'s laws, projectile motion, and conservation of momentum.',
       difficulty: 'beginner', estimatedMinutes: 30, visibility: 'demo_public',
@@ -531,6 +587,7 @@ async function seed() {
     });
 
     simIds.lightOptics = await insertSim({
+      id: SEED_SIM_IDS.lightOptics,
       uuid: SEED_SIMS.lightOptics, title: 'Light & Optics Lab',
       description: 'Explore reflection, refraction, lenses, and wave optics through interactive experiments.',
       difficulty: 'beginner', estimatedMinutes: 35, visibility: 'demo_public',
@@ -538,6 +595,7 @@ async function seed() {
     });
 
     simIds.aiLab = await insertSim({
+      id: SEED_SIM_IDS.aiLab,
       uuid: SEED_SIMS.aiLab, title: 'AI Fundamentals Lab',
       description: 'Train simple classifiers and observe machine-learning concepts in action.',
       difficulty: 'beginner', estimatedMinutes: 35, visibility: 'demo_and_institution',
@@ -545,6 +603,7 @@ async function seed() {
     });
 
     simIds.networkSecurity = await insertSim({
+      id: SEED_SIM_IDS.networkSecurity,
       uuid: SEED_SIMS.networkSecurity, title: 'Network Security Lab',
       description: 'Configure firewall rules and analyse packet captures to detect intrusions.',
       difficulty: 'intermediate', estimatedMinutes: 40, visibility: 'demo_and_institution',
@@ -552,6 +611,7 @@ async function seed() {
     });
 
     simIds.safetyProcedures = await insertSim({
+      id: SEED_SIM_IDS.safetyProcedures,
       uuid: SEED_SIMS.safetyProcedures, title: 'Safety Procedures & PPE Lab',
       description: 'Practice hazard identification and select correct PPE for industrial scenarios.',
       difficulty: 'beginner', estimatedMinutes: 25, visibility: 'demo_and_institution',
@@ -559,6 +619,7 @@ async function seed() {
     });
 
     simIds.electronicsLab = await insertSim({
+      id: SEED_SIM_IDS.electronicsLab,
       uuid: SEED_SIMS.electronicsLab, title: 'Electronics Lab',
       description: 'Build and test analogue and digital circuits on a virtual breadboard.',
       difficulty: 'beginner', estimatedMinutes: 35, visibility: 'institution',
@@ -566,6 +627,7 @@ async function seed() {
     });
 
     simIds.pumpPerformance = await insertSim({
+      id: SEED_SIM_IDS.pumpPerformance,
       uuid: SEED_SIMS.pumpPerformance, title: 'Pump Performance Lab',
       description: 'Analyse centrifugal pump curves and select operating points for given system requirements.',
       difficulty: 'intermediate', estimatedMinutes: 40, visibility: 'demo_and_institution',
@@ -573,6 +635,7 @@ async function seed() {
     });
 
     simIds.circuitAnalysis = await insertSim({
+      id: SEED_SIM_IDS.circuitAnalysis,
       uuid: SEED_SIMS.circuitAnalysis, title: 'Circuit Analysis Lab',
       description: 'Build and solve DC circuits using KVL, KCL, and Thevenin/Norton equivalents.',
       difficulty: 'intermediate', estimatedMinutes: 50, visibility: 'institution',

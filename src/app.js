@@ -46,6 +46,8 @@ const academicYearsRoutes  = require('./modules/academic-years/academic-years.ro
 const semesterTermsRoutes  = require('./modules/semester-terms/semester-terms.routes');
 const pageContentRoutes    = require('./modules/page-content/page-content.routes');
 const activityRoutes       = require('./modules/simulation-activity/activity.routes');
+const experimentsRoutes    = require('./modules/experiments/experiments.routes');
+const experimentsInstructorRoutes = require('./modules/experiments/experiments-instructor.routes');
 const quizzesRoutes          = require('./modules/quizzes/quizzes.routes');
 const quizAttemptsRoutes     = require('./modules/quiz-attempts/quiz-attempts.routes');
 const simulationScoresRoutes = require('./modules/simulation-scores/simulation-scores.routes');
@@ -62,7 +64,7 @@ const app = express();
 // req.secure, req.ip and req.protocol reflect the original client request
 // instead of the internal HTTP hop between the proxy and this Node process.
 if (config.env === 'production') {
-  app.set('trust proxy', 1);
+  app.set('trust proxy', config.trustProxyHops);
 
   // Redirect any plain-HTTP request to HTTPS. Relies on the proxy setting
   // X-Forwarded-Proto (standard behaviour for nginx/Caddy/most PaaS routers).
@@ -85,8 +87,68 @@ if (config.env === 'production') {
     : path.resolve(__dirname, '..', config.storage.simulationsDir);
 
   // Ensure the directory exists before serving (avoids startup error)
-  const fs = require('fs');
+  const fs   = require('fs');
+  const zlib = require('zlib');
   fs.mkdirSync(simDir, { recursive: true });
+
+  // Some uploaded Unity WebGL builds embed a third-party PDF-renderer plugin
+  // (used to show StreamingAssets documents inside the scene) that was
+  // compiled against an old Emscripten runtime aliasing UTF8ToString as
+  // Pointer_stringify. Current Unity WebGL exports no longer ship that
+  // alias, so calling it throws "ReferenceError: Pointer_stringify is not
+  // defined" inside _PDFJS_LoadDocumentFromURL — before pdfjsLib.getDocument()
+  // is ever called, so the click silently does nothing (no network request,
+  // no visible error to the learner). UTF8ToString has the same single-arg
+  // signature and already exists elsewhere in the same compiled file, so a
+  // plain text substitution fixes it without needing the Unity project to
+  // rebuild against. Applied at serve time (not to the files on disk) so it
+  // covers every already-uploaded and future build using this plugin.
+  //
+  // Builds that still ship their own shim (`function Pointer_stringify(s,len)
+  // {…return UTF8ToString(s,len)}` + `Module["Pointer_stringify"]=Pointer_stringify`)
+  // must NOT be patched: the rename would turn the shim into a recursive
+  // UTF8ToString and leave the bare `Pointer_stringify` reference dangling,
+  // throwing a ReferenceError at load so Unity hangs at 90% forever.
+  const frameworkPatchCache = new Map(); // filePath -> { mtimeMs, buffer | null (serve as-is) }
+
+  function serveFrameworkJs(res, filePath) {
+    let stat;
+    try { stat = fs.statSync(filePath); } catch { return false; }
+
+    const cached = frameworkPatchCache.get(filePath);
+    if (cached && cached.mtimeMs === stat.mtimeMs) {
+      if (!cached.buffer) return false; // known not to need patching
+      setWebGLHeaders(res, filePath);
+      res.send(cached.buffer);
+      return true;
+    }
+
+    const raw = fs.readFileSync(filePath);
+    const lower = filePath.toLowerCase();
+    const isGz  = lower.endsWith('.gz');
+    const isBr  = lower.endsWith('.br');
+    const decompressed = isGz ? zlib.gunzipSync(raw) : isBr ? zlib.brotliDecompressSync(raw) : raw;
+    const text = decompressed.toString('utf8');
+
+    const needsPatch = text.includes('Pointer_stringify(')
+      && !/function\s+Pointer_stringify\s*\(/.test(text); // build defines its own shim — leave it alone
+    if (!needsPatch) {
+      frameworkPatchCache.set(filePath, { mtimeMs: stat.mtimeMs, buffer: null });
+      return false; // let express.static serve it as-is
+    }
+
+    const patchedText = text.replace(/\bPointer_stringify\(/g, 'UTF8ToString(');
+    const patchedBuffer = isGz
+      ? zlib.gzipSync(patchedText)
+      : isBr
+        ? zlib.brotliCompressSync(patchedText)
+        : Buffer.from(patchedText, 'utf8');
+
+    frameworkPatchCache.set(filePath, { mtimeMs: stat.mtimeMs, buffer: patchedBuffer });
+    setWebGLHeaders(res, filePath);
+    res.send(patchedBuffer);
+    return true;
+  }
 
   // Injected into every simulation index.html so the cross-origin parent page
   // can receive canvas click positions via postMessage without needing
@@ -95,7 +157,12 @@ if (config.env === 'production') {
   // registered BEFORE Unity's scripts run.  Unity often calls
   // stopImmediatePropagation on keyboard events; by being first in the
   // capture chain we always fire before it can block us.
-  const CLICK_TRACKER_SCRIPT = `<script>
+  // A function, not a constant: the LMS relay below needs to stamp each
+  // event's projectId with the requesting simulation's own build_uuid (see
+  // its comment for why), which is only known per-request.
+  function renderInjectedScript(buildUuid) {
+    const buildUuidJson = JSON.stringify(buildUuid);
+    return `<script>
 (function(){
   var send = function(data) {
     try { window.parent.postMessage(data, '*'); } catch(_) {}
@@ -130,8 +197,57 @@ if (config.env === 'production') {
   window.addEventListener('keydown', function(e) {
     send({ type: 'sim_key', key: e.key, t: new Date().toISOString() });
   }, true);
+
+  // ── Structured LMS event relay (experiments tracking pipeline) ───────────
+  // Some Unity builds emit a richer, self-describing event contract (session/
+  // experiment/step/question events) via a compiled interop function that
+  // does two things: an unconditional same-page
+  // window.dispatchEvent(new CustomEvent(channel, {detail: payload})), and —
+  // ONLY if the Unity project has a "Parent Origin" configured AND it exactly
+  // matches wherever this page is actually served from — a same-origin-
+  // checked window.parent.postMessage(). Since this script runs inside the
+  // simulation's own iframe (the exact same window Unity dispatches on), the
+  // CustomEvent always reaches us regardless of that Parent Origin setting —
+  // we relay it to the parent page ourselves via a wildcard-target
+  // postMessage (same pattern as the click tracker above), so a build never
+  // needs a correctly configured Parent Origin for its structured tracking
+  // data to reach SimuLearn. Channel-name agnostic: it inspects the
+  // dispatched event's own detail shape (schemaVersion + projectId) rather
+  // than requiring a specific CustomEvent name, since that name is a runtime
+  // argument from the build's own code, not something fixed in its compiled JS.
+  //
+  // projectId override: the FM103 Bernoulli build hardcodes payload.projectId
+  // to the literal string "FM103" in its own C# code, the same for every
+  // SimuLearn upload of it — it has no way to know the build_uuid SimuLearn
+  // assigned this particular upload. Left as-is, every upload of this content
+  // would collide onto one shared tracking identity, defeating per-upload
+  // scoping. This page already knows its own build_uuid (baked in at serve
+  // time, below), so it overrides payload.projectId — and, when present,
+  // projectManifest.projectId — to that build_uuid before relaying. This is
+  // what actually makes "any uploaded simulation gets tracked independently"
+  // true regardless of whether the build itself cooperates.
+  var BUILD_UUID = ${buildUuidJson};
+  function withOverriddenProjectId(detail) {
+    var out = Object.assign({}, detail, { projectId: BUILD_UUID });
+    if (out.projectManifest && typeof out.projectManifest === 'object') {
+      out.projectManifest = Object.assign({}, out.projectManifest, { projectId: BUILD_UUID });
+    }
+    return out;
+  }
+  var nativeDispatchEvent = window.dispatchEvent.bind(window);
+  window.dispatchEvent = function(event) {
+    try {
+      var detail = event && event.detail;
+      if (detail && typeof detail === 'object' &&
+          typeof detail.schemaVersion === 'string' && typeof detail.projectId === 'string') {
+        send({ channel: 'simlearn:lms', payload: withOverriddenProjectId(detail) });
+      }
+    } catch (_) {}
+    return nativeDispatchEvent(event);
+  };
 })();
 </script>`;
+  }
 
   // Custom setHeaders for Unity WebGL MIME/encoding
   function setWebGLHeaders(res, filePath) {
@@ -185,8 +301,30 @@ if (config.env === 'production') {
   // Intercept HTML requests to inject the click-tracker script before serving.
   // Non-HTML requests fall through to express.static below.
   app.use(config.storage.simulationsUrlPrefix, (req, res, next) => {
-    const p = (req.path === '/' || req.path === '') ? '/index.html' : req.path;
+    // req.path is the raw pathname — Express/Node's URL parsing does NOT
+    // percent-decode it (e.g. a Unity export's "Build 005" folder arrives as
+    // literal "Build%20005"). express.static decodes internally via `send`,
+    // which is why it can find files this handler would otherwise miss —
+    // decode here too so both paths agree on the same file.
+    let decodedPath;
+    try {
+      decodedPath = decodeURIComponent(req.path);
+    } catch {
+      return next(); // malformed percent-encoding — let express.static 400/404 it
+    }
+    const p = (decodedPath === '/' || decodedPath === '') ? '/index.html' : decodedPath;
+
+    if (/\.framework\.js(\.gz|\.br)?$/i.test(p)) {
+      const filePath = path.join(simDir, p);
+      if (serveFrameworkJs(res, filePath)) return;
+      return next(); // not found, or nothing to patch — let express.static handle it
+    }
+
     if (!p.endsWith('.html')) return next();
+
+    // First path segment under the mount prefix is always the build_uuid
+    // (URL: /simulations-runtime/{uuid}/...) — needed by the LMS relay script.
+    const buildUuid = p.split('/').filter(Boolean)[0] || '';
 
     const filePath = path.join(simDir, p);
     fs.readFile(filePath, 'utf8', (err, html) => {
@@ -195,11 +333,12 @@ if (config.env === 'production') {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       // Inject at the very beginning of <head> so our capture listeners
       // are registered BEFORE Unity's own scripts run.
+      const injectedScript = renderInjectedScript(buildUuid);
       const modified = html.includes('<head>')
-        ? html.replace('<head>', '<head>' + CLICK_TRACKER_SCRIPT)
+        ? html.replace('<head>', '<head>' + injectedScript)
         : html.includes('</body>')
-          ? html.replace('</body>', CLICK_TRACKER_SCRIPT + '\n</body>')
-          : html + CLICK_TRACKER_SCRIPT;
+          ? html.replace('</body>', injectedScript + '\n</body>')
+          : html + injectedScript;
       res.send(modified);
     });
   });
@@ -283,8 +422,17 @@ app.use(helmet({
 }));
 
 // CORS configuration
+// Dev: reflect any origin (origin === undefined covers non-browser/no-Origin
+// requests, e.g. curl, server-to-server, Swagger "try it out" from the docs
+// page itself). Production: restrict to config.cors.allowedOrigins
+// (CORS_ORIGIN env, comma-separated) so only the deployed frontend(s) can
+// make credentialed requests.
 const corsOptions = {
-  origin: true,
+  origin(origin, callback) {
+    if (!origin || config.env !== 'production') return callback(null, true);
+    if (config.cors.allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error(`CORS: origin "${origin}" is not allowed`));
+  },
   credentials: true,
 };
 
@@ -357,6 +505,7 @@ apiRouter.use('/courses', quizzesRoutes);
 apiRouter.use('/courses', quizAttemptsRoutes);
 apiRouter.use('/courses', simulationScoresRoutes);
 apiRouter.use('/courses', gradeCategoriesRoutes);
+apiRouter.use('/courses', experimentsInstructorRoutes);
 apiRouter.use('/lti-platforms', ltiPlatformsRoutes);
 apiRouter.use('/lti/ags', ltiAgsRoutes);
 apiRouter.use('/lti/nrps', ltiNrpsRoutes);
@@ -381,6 +530,7 @@ apiRouter.use('/', semesterTermsRoutes);
 
 // Simulation activity tracking — all paths defined inside the router
 apiRouter.use('/', activityRoutes);
+apiRouter.use('/experiments', experimentsRoutes);
 
 app.use(`/api/${config.apiVersion}`, apiRouter);
 

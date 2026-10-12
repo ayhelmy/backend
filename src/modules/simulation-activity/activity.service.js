@@ -183,6 +183,7 @@ exports.start = async ({ courseId, lessonId, simulationId: requestedSimId }, act
     estimatedMinutes: sim.estimated_minutes ?? null,
     launchType:       sim.launch_type   ?? null,
     buildStatus:      sim.build_status  ?? null,
+    buildUuid:        sim.build_uuid    ?? null,
   };
 };
 

@@ -9,17 +9,21 @@ const Redis = require('ioredis');
 const config = require('./index');
 const logger = require('../utils/logger');
 
-const retryStrategy = (times) => Math.min(times * 50, 2000);
+const options = {
+  retryStrategy: (times) => Math.min(times * 50, 2000),
+  lazyConnect: true,
+  // Railway's private network is IPv6-only — family 0 lets DNS pick v4 or v6.
+  family: 0,
+};
 
 const redis = config.redis.url
-  ? new Redis(config.redis.url, { retryStrategy, lazyConnect: true })
+  ? new Redis(config.redis.url, options)
   : new Redis({
-    host: config.redis.host,
-    port: config.redis.port,
-    password: config.redis.password,
-    retryStrategy,
-    lazyConnect: true,
-  });
+      host: config.redis.host,
+      port: config.redis.port,
+      password: config.redis.password,
+      ...options,
+    });
 
 redis.on('connect', () => logger.info('Redis connected'));
 redis.on('error', (err) => logger.error('Redis error', { error: err.message }));

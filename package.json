@@ -9,6 +9,7 @@
     "gen-cert": "openssl req -x509 -newkey rsa:2048 -nodes -keyout certs/localhost-key.pem -out certs/localhost-cert.pem -days 825 -subj \"/CN=localhost\" -addext \"subjectAltName=DNS:localhost,IP:127.0.0.1,IP:172.20.44.1\"",
     "migrate": "node src/db/migrate.js",
     "seed": "node src/db/seed.js",
+    "seed:bedo-university": "node scripts/seed-bedo-university.js",
     "lint": "eslint src/**/*.js",
     "test": "NODE_ENV=test jest --runInBand --forceExit",
     "test:watch": "NODE_ENV=test jest --watch"

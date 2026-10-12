@@ -9,16 +9,24 @@ const { Pool } = require('pg');
 const config = require('./index');
 const logger = require('../utils/logger');
 
+const connection = config.db.url
+  ? { connectionString: config.db.url }
+  : {
+      host: config.db.host,
+      port: config.db.port,
+      database: config.db.name,
+      user: config.db.user,
+      password: config.db.password,
+    };
+
 const pool = new Pool({
-  host: config.db.host,
-  port: config.db.port,
-  database: config.db.name,
-  user: config.db.user,
-  password: config.db.password,
+  ...connection,
+  // Railway's public TCP proxy requires TLS; its private network does not.
+  ssl: config.db.ssl ? { rejectUnauthorized: false } : undefined,
   min: config.db.pool.min,
   max: config.db.pool.max,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  connectionTimeoutMillis: 5000,
 });
 
 pool.on('connect', () => {

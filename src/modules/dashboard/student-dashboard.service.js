@@ -17,9 +17,12 @@ module.exports = async function getStudentDashboard(actor, scope) {
     return emptyDashboard(scope);
   }
 
-  const rawCourses = await CourseModel.list({
-    institutionId, departmentId, academicYearId, semesterTermId, status: 'published', limit: 50,
-  });
+  // "My courses" = the student's own active enrollments in published courses —
+  // the same source as the Courses page. CourseModel.list() is the catalog view
+  // (every published course in the department/term), which showed courses the
+  // student never joined and hid enrollments from other departments/terms.
+  const rawCourses = (await CourseModel.listEnrolledByUser(actor.id))
+    .filter((c) => c.status === 'published');
   const courses = rawCourses.map(mapCourse);
   const courseIds = courses.map((c) => c.id);
 

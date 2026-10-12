@@ -8,6 +8,7 @@ exports.create  = async (req, res, next) => { try { ApiResponse.created(res, 'Si
 exports.getOne  = async (req, res, next) => { try { ApiResponse.ok(res, 'Simulation', await svc.getOne(req.params.id, req.user ?? null)); } catch (e) { next(e); } };
 exports.update  = async (req, res, next) => { try { ApiResponse.ok(res, 'Simulation updated', await svc.update(req.params.id, req.body, req.user)); } catch (e) { next(e); } };
 exports.remove  = async (req, res, next) => { try { await svc.remove(req.params.id, req.user); ApiResponse.noContent(res); } catch (e) { next(e); } };
+exports.deleteImpact = async (req, res, next) => { try { ApiResponse.ok(res, 'Delete impact', await svc.getDeleteImpact(req.params.id, req.user)); } catch (e) { next(e); } };
 exports.preview = async (req, res, next) => { try { ApiResponse.ok(res, 'Preview URL', await svc.getPreviewUrl(req.params.id, req.user ?? null)); } catch (e) { next(e); } };
 
 exports.launch  = async (req, res, next) => { try { ApiResponse.ok(res, 'Simulation launched', await svc.launch(req.params.id, req.user, req)); } catch (e) { next(e); } };
