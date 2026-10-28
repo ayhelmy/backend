@@ -9,9 +9,6 @@ node_modules/
 # local dev TLS certs (regenerate with `npm run gen-cert`)
 certs/*.pem
 
-# runtime uploads — in production these live on the Railway Volume
-storage/
-
 # logs / test output
 logs/
 *.log
