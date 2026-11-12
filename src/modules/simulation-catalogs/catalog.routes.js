@@ -26,6 +26,7 @@
 
 const { Router } = require('express');
 const c           = require('./catalog.controller');
+const chunked     = require('./chunked-upload');
 const authenticate     = require('../../middleware/authenticate');
 const { requirePermission, requireAnyPermission } = require('../../middleware/authorize');
 const validate         = require('../../middleware/validate');
@@ -71,6 +72,11 @@ router.get('/:id/simulations',                        canView,   c.getCatalogSim
 // WebGL upload — MUST be before /:id/simulations POST to avoid param shadowing is not an issue here,
 // but keep it explicit so the upload middleware runs before validation.
 router.post('/:id/simulations/webgl-upload',          canManage, handleZipUpload, v.webglUpload, validate, c.uploadWebGLSimulation);
+// Chunked variant for large ZIPs — Railway cuts any request body that takes
+// longer than 5 min to upload (see chunked-upload.js).
+router.post('/:id/simulations/webgl-upload/chunks',                    canManage, chunked.initUpload);
+router.put('/:id/simulations/webgl-upload/chunks/:uploadId/:index',    canManage, chunked.uploadChunk);
+router.post('/:id/simulations/webgl-upload/chunks/:uploadId/complete', canManage, v.webglUpload, validate, chunked.completeUpload);
 router.post('/:id/simulations',                       canManage, v.createSimulationInCatalog, validate, c.createSimulationInCatalog);
 router.patch('/:id/simulations/:simId/thumbnail',     canManage, handleImageUpload, c.uploadSimulationThumbnail);
 router.patch('/:id/simulations/:simId/click-regions', canManage, handleClickRegionsUpload, c.uploadClickRegions);

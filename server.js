@@ -58,16 +58,18 @@ async function start() {
   }
 
   const server = createServer();
+
+  // Node >= 18 aborts any request whose body hasn't fully arrived within
+  // server.requestTimeout (default 300 s). A several-hundred-MB Unity WebGL ZIP
+  // on an ordinary upload link takes longer than that, so the socket was cut
+  // mid-upload and the browser only saw a generic network error.
+  // headersTimeout (60 s default) is untouched and still guards against
+  // slow-header (slowloris) clients.
+  const uploadTimeoutMin = parseInt(process.env.UPLOAD_REQUEST_TIMEOUT_MIN || '30', 10);
+  server.requestTimeout = uploadTimeoutMin * 60 * 1000;
+
   const isHttps = server instanceof https.Server;
   const scheme = isHttps ? 'https' : 'http';
-
-  // Node closes any request that is not fully received within requestTimeout
-  // (default 300 s). A several-hundred-MB Unity WebGL zip over a normal uplink
-  // takes longer than that, so the connection was cut mid-upload (Railway's
-  // edge then answered 502 and the browser reported a lost request).
-  // Default 30 min; REQUEST_TIMEOUT_MS overrides, 0 disables.
-  const requestTimeoutMs = parseInt(process.env.REQUEST_TIMEOUT_MS || String(30 * 60 * 1000), 10);
-  server.requestTimeout = Number.isFinite(requestTimeoutMs) ? requestTimeoutMs : 30 * 60 * 1000;
 
   server.listen(PORT, () => {
     logger.info(`Bedo SimuLearn API running on ${scheme}://localhost:${PORT}/api/${config.apiVersion}`);
