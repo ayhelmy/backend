@@ -30,7 +30,7 @@ const { once }     = require('events');
 const { pipeline } = require('stream/promises');
 
 const config   = require('../../config');
-const ApiError    = require('../../utils/ApiError');
+const ApiError    = require('../../utils/apiError');
 const ApiResponse = require('../../utils/apiResponse');
 const svc      = require('./catalog.service');
 
